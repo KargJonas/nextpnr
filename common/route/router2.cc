@@ -2427,14 +2427,20 @@ struct Router2
                     nets_by_runtime.at(i).first / 1000.0);
             }
         }
+
+        // Check what we did was actually legal
+        ctx->check();
+        ctx->checkRoutedDesign();
+
         auto rend = std::chrono::high_resolution_clock::now();
+
+        log_info("Checksum: 0x%08x\n", ctx->checksum());
         log_info("Router2 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-        log_info("Running router1 to check that route is legal...\n");
+        timing_analysis(ctx, true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
+                        true /* warn_on_failure */, true /* update_results */);
 
         lock.unlock();
-
-        router1(ctx, Router1Cfg(ctx));
     }
 };
 } // namespace
