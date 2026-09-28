@@ -72,7 +72,7 @@ files are byte-identical; the generated chipdb matches shrike's exactly).
 
 - The placements where shrike's flow "worked" were carried by **vendor bits
   replayed from per-placement tables** mislabelled as clock data: on silicon,
-  removing the replayed routing bits leaves the pad undriven. The tables grew
+  removing the replayed routing bits stops the output. The tables grew
   from misreading the vendor's route log (nets 3 and 4, read as the clock
   spine, are the design's data nets -- the vendor's own log names net 2 the
   clock), and the entry for one placement even writes into a LUT's truth
