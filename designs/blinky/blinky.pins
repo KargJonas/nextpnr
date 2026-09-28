@@ -1,0 +1,8 @@
+# clk is the 50 MHz on-chip oscillator: clock input W0 (datasheet Table 10).
+set_clk clk W0
+# The board LED is GPIO16, but the output config of its IOB (31,6) is not
+# recovered yet (emit_sdc knows GPIO8-15 only), so led goes to PMOD GPIO11.
+set_io led GPIO11
+set_io la[0] GPIO8
+set_io la[1] GPIO9
+set_io la[2] GPIO10

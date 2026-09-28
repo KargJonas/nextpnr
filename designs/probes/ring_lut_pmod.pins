@@ -1,0 +1,9 @@
+# nextpnr pin constraints for the explicit LUT ring PMOD diagnostic.
+set_io q[0] GPIO8
+set_io q[1] GPIO9
+set_io q[2] GPIO10
+set_io q[3] GPIO11
+set_io q[4] GPIO12
+set_io q[5] GPIO13
+set_io q[6] GPIO14
+set_io q[7] GPIO15
