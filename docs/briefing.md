@@ -94,7 +94,9 @@ Working: the whole flow from Verilog to an SPI image for any design in the
 supported subset, in one container; the hardware loop (flash + capture).
 Not yet working: **no bitstream from this flow runs on silicon yet.** The ring
 probe still settles, and its pad values do not change when the LUT truth
-tables do, so a defect remains between the LUT and the output pad.
+tables do, so a defect remains between the LUT and the output pad. The board
+LED's pad (GPIO16) has no recovered output configuration yet, so
+`designs/blinky` drives a PMOD pin instead.
 
 ## Next steps
 
@@ -103,7 +105,7 @@ tables do, so a defect remains between the LUT and the output pad.
    tool), and diff family by family with eflx-port's attribution. That turns
    "the pad is wrong" into "these bits are wrong", instead of flipping bits.
 2. Combinational path, then flip-flops with the W0 clock entry, then the carry
-   chain: the 25-bit counter blinking the board LED (`designs/blinky`, which
-   builds today).
+   chain: the 25-bit counter in `designs/blinky` (it builds today) blinking a pin.
 3. Compensate level-13 inversions the way the vendor does (LUT truth table,
-   IOB value bits), and port the IOB encoder from the decompile.
+   IOB value bits), port the IOB encoder from the decompile, and recover
+   GPIO16's output configuration from one vendor build -- then the board LED.
