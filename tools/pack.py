@@ -729,35 +729,38 @@ _WEST_EDGE_CLK_SEL = {
 
 
 def rbb_clk_sel_to_bitstream(rbb_x, rbb_row, signal):
-    """Convert a covered per-RBB CLK_SEL signal to bitstream position."""
+    """Convert a covered per-RBB CLK_SEL signal to its bitstream positions.
+
+    Returns a list of (word_idx, bit, inverted) or None.
+    """
     if signal != "CLK_SEL":
         return None
 
     # Row 1 (top IOB): all columns
     if rbb_row == 1:
-        return xyp_to_word(rbb_x, 26, 10), 23, False
+        return [(xyp_to_word(rbb_x, 26, 10), 23, False)]
 
     # Row 0 (bottom IOB): all columns except edges
     if rbb_row == 0 and rbb_x not in (0, 31):
-        return xyp_to_word(rbb_x, 26, 10), 28, False
+        return [(xyp_to_word(rbb_x, 26, 10), 28, False)]
 
     # Row 30 (top penultimate): all columns except edges
     if rbb_row == 30 and rbb_x not in (0, 31):
-        return xyp_to_word(rbb_x, 26, 0), 22, False
+        return [(xyp_to_word(rbb_x, 26, 0), 22, False)]
 
     # West edge (X=0), rows with verified data from make_multiclk fuzz.
     if rbb_x == 0:
         west_bits = _WEST_EDGE_CLK_SEL.get(rbb_row)
         if west_bits is not None:
             pos, bit = west_bits
-            return xyp_to_word(0, 26, pos), bit, False
+            return [(xyp_to_word(0, 26, pos), bit, False)]
 
     # East edge (X=31), rows with verified data
     if rbb_x == 31:
         east_bits = _EAST_EDGE_CLK_SEL.get(rbb_row)
         if east_bits is not None:
             pos, bit = east_bits
-            return xyp_to_word(31, 26, pos), bit, False
+            return [(xyp_to_word(31, 26, pos), bit, False)]
 
     # Interior CLBs (rbb_x in {1,4,7,10,13,16,19,22,25,28}), even rows 2..28.
     # Verified on make_multiclk plus vendor RAM-site probes at X=28.
@@ -766,7 +769,14 @@ def rbb_clk_sel_to_bitstream(rbb_x, rbb_row, signal):
         bit_idx = 324 - 26 * ri + 16 * ((ri + 1) // 4)
         pos = bit_idx // 32
         bit = bit_idx % 32
-        return xyp_to_word(rbb_x + 1, 25, pos), bit, False
+        # CLK_SEL has a second copy in the RBB's middle tile, BL10 WL24 of its
+        # first row in columns 1/7/../25 and WL31 of its second in 4/10/../28
+        # (equal to CLK_SEL in every vendor build; 22 two-clock exceptions at
+        # column 1). The template holds it at 1: left there, the flip-flops of
+        # columns 19 and 25 never clocked.
+        shadow = (coords.trace_to_word_bit(rbb_row, rbb_x + 1, 10, 24) if rbb_x % 6 == 1
+                  else coords.trace_to_word_bit(rbb_row + 1, rbb_x + 1, 10, 31))
+        return [(xyp_to_word(rbb_x + 1, 25, pos), bit, False), (*shadow, False)]
 
     return None
 
@@ -1310,8 +1320,8 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
             signal = rbb_match.group(3)
             result = rbb_clk_sel_to_bitstream(rbb_x, rbb_row, signal)
             if result:
-                word_idx, bit, inverted = result
-                apply_bit(word_idx, bit, inverted, value)
+                for word_idx, bit, inverted in result:
+                    apply_bit(word_idx, bit, inverted, value)
                 stats["packed_rbb_clk"] += 1
                 continue
 
