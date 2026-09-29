@@ -330,20 +330,22 @@ def level1_down_src3(src_branch, src_down, timed=False):
     :440264-440267 (iVar41==1 && iVar49==3, branch<4 sets local_148 lane0):
         stage1 base {lane1} toggled at the argmin lane = (src_branch-1) if timed
         else 0 (the same criticality-argmin outcome level4_down uses); stage2 base
-        {lane1} + lane0 -> lanes {0,1}.
+        {lane1} + lane0 -> lanes {0,1}; src_branch >= 4 sets lane4 instead
+        (local_138 lane0, :440268-440270) -> lanes {1,4}.
       -> (3,'D',1) timed: argmin lane = 0 -> stage1 0b00011 | stage2 0b00011<<5 = 99
         (multilut6 (1,'D',1) <- (3,'D',1)).
+      -> (3,'D',4): stage1 0b00011 | stage2 0b10010<<5 = 579; the vendor's 576
+        (stage1 0b00000) is the timed argmin at lane1. Corpus: 242 of 242 stage2.
     """
     if src_down == 0:                                # (3,'U')
         s1 = 0b00011 if src_branch < 4 else 0b00000  # local_208 low+high / clear
         s2 = 0b00010 ^ (1 << 2)                      # base lane1 toggle lane2 = 6
         return s1 | (s2 << 5)
-    if src_branch < 4:                               # (3,'D') argmin path
-        lane = (src_branch - 1) if timed else 0      # argmin outcome (cf. level4_down)
-        s1 = 0b00010 ^ (1 << lane)                   # base lane1 toggle argmin lane
-        s2 = 0b00010 ^ (1 << 0)                      # base lane1 set lane0 (:440267)
-        return s1 | (s2 << 5)
-    return None                                      # src branch>=4 -> unobserved
+    # (3,'D') argmin path
+    lane = (src_branch - 1) if timed and src_branch < 4 else 0   # cf. level4_down
+    s1 = 0b00010 ^ (1 << lane)                       # base lane1 toggle argmin lane
+    s2 = 0b00010 ^ (1 << (0 if src_branch < 4 else 4))  # :440267 / :440270
+    return s1 | (s2 << 5)
 
 
 def level1_down_argmin(src_level, src_down, src_branch, crit_of_edge):

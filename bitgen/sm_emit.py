@@ -50,7 +50,7 @@ def value_for(key, src, timed, tval=0, has_1u=False, active=True):
         return sm_writer.level0_down_value(s_lvl, s_br, s_idx, s_down)
     if level == 5 and direction == "D":
         return sm_writer.level5_down(branch, s_lvl, s_br, s_idx, s_down)
-    if level == 3 and direction == "D" and s_lvl == 5 and s_dir == "D":
+    if level == 3 and direction == "D":
         return sm_writer.level3_down(branch, s_lvl, s_br, s_idx, s_down)
     if level == 1 and direction == "D":
         if s_lvl == 1 and s_dir == "U":
