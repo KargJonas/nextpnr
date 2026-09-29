@@ -799,9 +799,9 @@ def _we_sel_pos_bit(rbb_row):
 
 
 def we_sel_to_bitstream(rbb_x, rbb_row, signal):
-    """Convert a WE_SEL[n] signal to bitstream position.
+    """Convert a WE_SEL[n] signal to its bitstream positions.
 
-    Returns (word_idx, bit, inverted) or None.
+    Returns a list of (word_idx, bit, inverted) or None.
     """
     if rbb_row not in _MEMORY_CLB_ROWS:
         return None
@@ -819,7 +819,14 @@ def we_sel_to_bitstream(rbb_x, rbb_row, signal):
     # the 3-bit field is fully solved.  Extend the observed contiguous Y-lane
     # pattern to bit 2 at Y=28.
     y_bs = 26 + sel_bit
-    return xyp_to_word(rbb_x + 1, y_bs, pos), bit, False
+    places = [(xyp_to_word(rbb_x + 1, y_bs, pos), bit, False)]
+    if sel_bit == 0:
+        # WE_SEL[0] has a second copy in the RBB's own column.  The template
+        # holds it at 1 and the vendor clears it whenever a memory CLB is used
+        # as plain logic; left set, the site's flip-flops stay dead on silicon
+        # (rows 6/8/22/24 at column 28: static until this bit was cleared).
+        places.append((xyp_to_word(rbb_x, y_bs, pos), bit, False))
+    return places
 
 
 # ---------------------------------------------------------------------------
@@ -1041,12 +1048,12 @@ def collect_lut_ipt_values(sdc_data):
 
 
 def lut_ipt_sel_is_known_fixed_shape(rbb_x, rbb_row, signal, value, lut_ipt_values):
-    """Return True for the current vendor-grounded sitewide RAM32X1D shape.
+    """Return True for the vendor-grounded LUT_IPT_SEL shapes of a memory CLB.
 
-    The open placement-to-SDC path currently emits LUT_IPT_SEL only for the
-    sitewide single-RBB RAM32X1D mode, and all local vendor-backed examples use
-    the fixed logical value 01000 (=8). Preserve the template bitstream shape
-    for that case instead of reporting the field as unmapped.
+    A memory CLB used as plain logic carries 00000 and the sitewide
+    single-RBB RAM32X1D mode the fixed logical value 01000 (=8), in every
+    vendor-backed example. Preserve the template bitstream shape for both
+    instead of reporting the field as unmapped.
     """
     if rbb_row not in _MEMORY_CLB_ROWS:
         return False
@@ -1055,7 +1062,7 @@ def lut_ipt_sel_is_known_fixed_shape(rbb_x, rbb_row, signal, value, lut_ipt_valu
     if not m:
         return False
 
-    if lut_ipt_values.get((rbb_x, rbb_row)) != 8:
+    if lut_ipt_values.get((rbb_x, rbb_row)) not in (0, 8):
         return False
 
     sel_bit = int(m.group(1))
@@ -1292,8 +1299,8 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
             signal = rbb_match.group(3)
             result = we_sel_to_bitstream(rbb_x, rbb_row, signal)
             if result:
-                word_idx, bit, inverted = result
-                apply_bit(word_idx, bit, inverted, value)
+                for word_idx, bit, inverted in result:
+                    apply_bit(word_idx, bit, inverted, value)
                 stats["packed_we_sel"] += 1
                 continue
 

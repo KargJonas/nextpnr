@@ -1038,12 +1038,15 @@ def emit_sdc(placement, out_file):
             # The site-wide single-RBB RAM32X1D path now derives the locally
             # RE-backed cases from the exported logical port topology. Other
             # L1 memory modes still fall back to the older placeholder until
-            # they have equally grounded semantics.
-            if is_memory_clb and ram_slices:
+            # they have equally grounded semantics. A memory CLB used as plain
+            # logic carries 0, as the vendor writes it.
+            if is_memory_clb:
                 if sitewide_ram is not None:
                     we_sel_val = derive_sitewide_ram32x1d_we_sel(sitewide_ram)
-                else:
+                elif ram_slices:
                     we_sel_val = 1
+                else:
+                    we_sel_val = 0
                 for bit in range(3):
                     val = (we_sel_val >> bit) & 1
                     f.write(f"set_case_analysis {val} {prefix}/WE_SEL[{bit}]\n")
@@ -1052,11 +1055,13 @@ def emit_sdc(placement, out_file):
             # The site-wide single-RBB RAM32X1D path uses a fixed vendor-backed
             # shape. Other L1 memory modes still reuse the same observed value
             # until their per-mode semantics are RE-backed.
-            if is_memory_clb and ram_slices:
+            if is_memory_clb:
                 if sitewide_ram is not None:
                     ipt_sel_val = derive_sitewide_ram32x1d_lut_ipt_sel(sitewide_ram)
-                else:
+                elif ram_slices:
                     ipt_sel_val = SITEWIDE_RAM32X1D_LUT_IPT_SEL
+                else:
+                    ipt_sel_val = 0
                 for bit in range(5):
                     val = (ipt_sel_val >> bit) & 1
                     f.write(f"set_case_analysis {val} {prefix}/LUT_IPT_SEL[{bit}]\n")
