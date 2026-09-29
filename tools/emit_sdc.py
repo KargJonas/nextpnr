@@ -178,29 +178,6 @@ _EDGE_IOB_OUTPUT_SHARED_SEL_BY_D0_BRANCH = {
     3: 1,
 }
 
-# East-edge (gx=31) IOB mux values depend on the IOB's gy position, not just
-# the D0 branch.  Each IOB at gy=y has 4 possible routing sources from two
-# adjacent grid rows; the O0/shared mapping is position-specific and was
-# reverse-engineered from vendor SDC output for the counter16 HITL design
-# (GPIO8-15 → east-edge IOBs gy=8,9,22-27).
-# Key: gy.  Value: (O0_sel, shared_sel) one-hot mux values {1,2,4,8}.
-# sh=2 cases (O0=ASEL) appear when the routing source is at the "default"
-# position for that IOB; sh=1 cases use alternate routes.
-_EAST_EDGE_IOB_OUTPUT_BY_GY = {
-    4:  (4, 1),  # GPIO18 — provisional, unverified
-    5:  (2, 1),  # GPIO17 — provisional, unverified
-    6:  (1, 2),  # GPIO16 — provisional, unverified (pad_in_d0_branch=2 observed)
-    7:  (1, 2),  # GPIO?  — provisional, unverified
-    8:  (1, 2),
-    9:  (1, 2),
-    22: (4, 1),
-    23: (2, 1),
-    24: (1, 2),
-    25: (8, 1),
-    26: (2, 1),
-    27: (1, 2),
-}
-
 # Vendor-vs-packer clean single-output deltas that are not represented in the
 # vendor SDC. These are west-edge side bits keyed by fabric site and, for the
 # route-sensitive corner/mid-edge cases, by terminal D0 branch.
@@ -545,23 +522,22 @@ def derive_edge_iob_output_muxes(iob):
     gy = int(iob.get('gy', -1))
     net = iob.get('net', '')
 
-    # East-edge IOBs (gx=31): O0_sel and shared_sel derived from nextpnr routing.
-    # D0 branch k → one-hot mux input 1<<k (same as west-edge).
+    # East-edge IOBs (gx=31): O0 selects the D0 branch the data came through
+    # (branch k -> one-hot 1<<k, as on the west edge). The output enable is a
+    # constant that route_bits routes to nothing, so O1/SR/CE must not name a
+    # fabric branch: the vendor sets them to A, and to B when O0 itself is A
+    # (read from its builds of one probe on every row-31 pad; with both on A
+    # the pad sits static high).
     if gx == 31:
         if net in ('$PACKER_GND', '$PACKER_VCC'):
-            return 1, 1
-
+            raise UnsupportedBackendFeature(
+                f"east-edge constant output at (31,{gy}) is not supported")
         data_branch = int(iob.get('pad_in_d0_branch', -1))
         if data_branch < 0:
             raise UnsupportedBackendFeature(
                 f"east-edge IOB at (31,{gy}) has no pad_in_d0_branch in placement"
             )
-        o0 = 1 << data_branch
-        # The output enable of an output pad is a constant; route_bits routes no
-        # constant net, so the shared (O1/SR/CE) selects must not name a fabric
-        # branch. The vendor sets them to A for every enabled east output
-        # (vendor osc_probe: GPIO10 = RBB_31_25 and GPIO8 = RBB_31_27).
-        return o0, 1
+        return 1 << data_branch, 2 if data_branch == 0 else 1
 
     branch = int(iob.get('pad_in_d0_branch', -1))
     o0 = _EDGE_IOB_OUTPUT_O0_BY_D0_BRANCH.get(branch)
@@ -586,22 +562,21 @@ def derive_edge_iob_output_nvm_bits(iob):
     #   own tile   bl7 wl1 = 0   enables the output driver
     #              bl8 wl1 = 1   bypasses the IOB's output flip-flop (template)
     #              bl4 wl26 = 0
-    #   enable tile bl9|10 wl14 = 0 and wl25 = 0
+    #   enable tile bl9|10, the "lane 4" of the three shared muxes and wl25:
+    #              shared A: wl14 = 0      shared B: wl22 = 1, wl30 = 0
+    #              wl25 = 0 either way
     # The enable tile is the pad's own for a single pad (6, 26, 27) and the
     # even tile of its pair for 8/9, 22/23, 24/25 (bl9 for the even pad, bl10
     # for the odd one).
     if gx == 31:
-        if net in ('$PACKER_GND', '$PACKER_VCC'):
-            raise UnsupportedBackendFeature(
-                f"east-edge constant output at (31,{gy}) is not supported")
         if gy not in _EAST_PAD_ENABLE_TILE:
             raise UnsupportedBackendFeature(
                 f"east-edge output at (31,{gy}) is not RE-backed (GPIO16, 8-13 are)")
         et, ebl = _EAST_PAD_ENABLE_TILE[gy]
-        return [(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
-                (*_word_bit(gy, 31, 4, 26), 0),
-                (*_word_bit(et, 31, ebl, 14), 0),
-                (*_word_bit(et, 31, ebl, 25), 0)]
+        lane4 = [(14, 0)] if derive_edge_iob_output_muxes(iob)[1] == 1 else [(22, 1), (30, 0)]
+        return ([(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
+                 (*_word_bit(gy, 31, 4, 26), 0), (*_word_bit(et, 31, ebl, 25), 0)] +
+                [(*_word_bit(et, 31, ebl, wl), v) for wl, v in lane4])
 
     # West IOB constant outputs ($PACKER_GND / $PACKER_VCC): the
     # _WEST_IOB_OUTPUT_NVM_BITS entries were recovered from fabric-driven

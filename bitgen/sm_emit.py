@@ -252,16 +252,23 @@ def emit_design(g, nets, bound_ports, input_tiles, timed=False, image=None,
 
     used, dest, mux2net, net_nodes = {}, {}, {}, {}
     for nid, hops in nets.items():
-        delivered = {}
+        delivered = {}          # tile -> [(source tile, key)] delivered into it, in route order
         nodes = set()
         for h in hops:
             ft, tt = (h["sx"], h["sy"]), (h["dx"], h["dy"])
             key = (h["level"], "D" if h["j"] else "U", h["branch"], h["index"])
-            used[(ft, key)] = delivered.get(ft)
-            delivered[tt] = key
+            m = g.sm_at(*ft).get(key)
+            # two hops can deliver into one tile (an exit and a bounce), so the
+            # source is the delivered node with an edge into this mux, not the last
+            feeds = delivered.get(ft, [])
+            into = {p for p, _ in g.radj.get(m.nid, [])} if m is not None else set()
+            fed = [k for t, k in feeds
+                   if (g.sm_at(*t).get(k) is not None
+                       and g.sm_at(*t)[k].nid in into)]
+            used[(ft, key)] = fed[-1] if fed else (feeds[-1][1] if feeds else None)
+            delivered.setdefault(tt, []).append((ft, key))
             dest[(ft, key)] = tt
             mux2net[(ft, key)] = nid
-            m = g.sm_at(*ft).get(key)
             if m is not None:
                 nodes.add(m.nid)
                 for a, _ in g.adj.get(m.nid, []) + g.radj.get(m.nid, []):
