@@ -31,6 +31,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from bitgen import coords  # noqa: E402
+
 # Default template: empty bitstream from eda-placer
 DEFAULT_TEMPLATE = PROJECT_ROOT / "device" / "template.bin"
 DEFAULT_DB = PROJECT_ROOT / "device"
@@ -829,6 +832,26 @@ def we_sel_to_bitstream(rbb_x, rbb_row, signal):
     return places
 
 
+def memory_clb_logic_bits(rbb_x, rbb_row):
+    """The RAM defaults a memory CLB used as plain logic must drop.
+
+    The template holds BL4 WL26-30 of a memory CLB's tiles at a column-dependent
+    RAM default (11110 at columns 1/4/7/13, 11001 at 22/28, ...), where plain
+    rows hold 0. The vendor clears WL26-29 in the four corner tiles and WL30 in
+    the middle one whenever the CLB is plain logic (every such RBB of the
+    vendor corpus; WL30 of the corners is content). Left set, the site's
+    flip-flops stay dead: memory rows at columns 1/7/13 ran once cleared.
+    Returns (word_idx, bit) pairs to clear.
+    """
+    out = []
+    for dx in (0, 1):
+        for dy in (0, 2):
+            for wl in range(26, 30):
+                out.append(coords.trace_to_word_bit(rbb_row + dx, rbb_x + dy, 4, wl))
+    out.append(coords.trace_to_word_bit(rbb_row + 1, rbb_x + 1, 4, 30))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Slice-output mux encoders (AQ1_SEL / AMX_SEL / OAQ_SEL)
 # ---------------------------------------------------------------------------
@@ -1301,6 +1324,11 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
             if result:
                 for word_idx, bit, inverted in result:
                     apply_bit(word_idx, bit, inverted, value)
+                prefix = sdc_path[:-len(signal)]
+                if signal == "WE_SEL[0]" and not any(
+                        sdc_data.get(f"{prefix}WE_SEL[{i}]") for i in range(3)):
+                    for word_idx, bit in memory_clb_logic_bits(rbb_x, rbb_row):
+                        apply_bit(word_idx, bit, False, 0)
                 stats["packed_we_sel"] += 1
                 continue
 
