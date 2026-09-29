@@ -277,14 +277,11 @@ void SLG47910Impl::emit_placement()
             int abc_bit = 5; // X_RAW default (vendor 100000)
             if (src != WireId()) {
                 IdString wname = ctx->wire_info(src).type;
-                if (wname == ctx->id("LUTO")) {
-                    abc_bit = 5;
-                    NetInfo *net = ctx->getBoundWireNet(src);
-                    if (net && net->driver.cell && net->driver.cell->type == id_SLG_LUT) {
-                        if (cell_param_string(net->driver.cell, ctx->id("LUT_MODE")) == "LUT5")
-                            abc_bit = 2;
-                    }
-                }
+                // The vendor feeds the flip-flop from X_RAW (the LUT6 output)
+                // even for a LUT of five or fewer inputs (osc_probe's LUT1:
+                // AQ1_SEL_D = 10000). OX0 is the LUT5_0 half of a split LUT,
+                // which this flow never configures.
+                if (wname == ctx->id("LUTO"))            abc_bit = 5;  // X_RAW
                 else if (wname == id_CRY_C)            abc_bit = 3;  // C_BIT
                 else if (wname == id_CRY_S)            abc_bit = 4;  // S_BIT
                 else if (wname == id_EXTRA_IN)         abc_bit = 0;  // EXTRA_IN

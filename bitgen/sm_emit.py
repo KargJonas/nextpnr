@@ -203,9 +203,11 @@ def _apparatus_writes(tile, enabled, src):
     for br in (2, 5):
         out.append((tile, (4, "U", br, 0), on))
     # (4,'D') stage encodings of the apparatus state (the level-4 encoder over
-    # the state's (s1,s2): enabled (0,3), bypassed (1,4) -- single_ff trace +
-    # the clock corner, falsified corpus-wide by the emit==reference check).
-    s1, s2 = (0, 3) if enabled else (1, 4)
+    # the state's (s1,s2)): enabled (0,3) -- single_ff trace + the clock corner.
+    # Bypassed is (1,0): the vendor's W0-clocked osc_probe writes 48 = (1,0) at
+    # both of its bypassed turns; the (1,4) the single_ff trace suggested
+    # breaks the turn on silicon.
+    s1, s2 = (0, 3) if enabled else (1, 0)
     for br in (2, 5):
         out.append((tile, (4, "D", br, 0), sm_writer.level4_down_value(br, s1, s2)))
     # (5,'U') root select: the delivering U1B0 feed when enabled, the U1B1
@@ -369,41 +371,9 @@ def emit_design(g, nets, bound_ports, input_tiles, timed=False, image=None,
             for (t, k, v) in _apparatus_writes(tile, False, None):
                 if (t, k) not in used and (k[0], k[1]) != (4, "D"):
                     writes.setdefault((t, k), v)
-    # (0,'D') sibling rewrites at delivery tiles: the unrouted (0,'D') branches
-    # are pointed at the PARTNER lane of the tile's arriving (1,'D') feeder
-    # (corpus table: B0N0 -> B0N1, B1 -> B0N0, B2 -> B3, B3 -> B2; a B0N1
-    # feeder leaves the template). The rewrite applies only when the feeder
-    # turn is itself level-1-fed (a bounce/lateral): a long-line-fed feeder
-    # leaves the siblings at the template (xor_reg trace at (24,1) vs the
-    # rewritten and_reg (2,3)). With several feeders the lowest-branch applies.
-    _PARTNER = {(0, 0): "D1B0N1", (1, 0): "D1B0N0",
-                (2, 0): "D1B3N0", (3, 0): "D1B2N0"}
-    deliv = {}
-    for (tile, key), rsrc in used.items():
-        if key[0] == 0 and key[1] == "D" and rsrc is not None \
-                and rsrc[0] == 1 and rsrc[1] == "D":
-            cur = deliv.get(tile)
-            if cur is None or (rsrc[2], rsrc[3]) < (cur[2], cur[3]):
-                deliv[tile] = rsrc
-    feeder_src = {}                       # (1,'D') key -> its own routed source
-    for (tile, key), rsrc in used.items():
-        if key[0] == 1 and key[1] == "D":
-            feeder_src.setdefault(key, rsrc)
-    for (x, y), feeder in deliv.items():
-        fsrc = feeder_src.get(feeder)
-        if fsrc is not None and fsrc[0] >= 3:
-            continue                                  # long-line-fed: template
-        partner = _PARTNER.get((feeder[2], feeder[3]))
-        if partner is None:
-            continue                                  # B0N1 feeder: template
-        for br in range(4):
-            k = (0, "D", br, 0)
-            if ((x, y), k) in used or g.sm_at(x, y).get(k) is None:
-                continue
-            v = sm_routing.compute_select(0, "D", br, 0, partner,
-                                          _selval(tmpl_words, x, y, k))
-            if v is not None:
-                writes.setdefault(((x, y), k), v)
+    # (0,'D') siblings at a delivery tile keep the device template: the vendor's
+    # W0-clocked osc_probe leaves them there at both delivery tiles (the partner
+    # -lane rewrite read off single_ff/and_reg does not hold on it).
 
     # -- 3. the constant clock-corner block.
     for (t, k, v) in _corner_writes(g):

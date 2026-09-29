@@ -1501,14 +1501,6 @@ _CHIP_LEVEL_BASELINE_FIXUPS = (
     (11208, 28, 1),
     (11219, 17, 1),
     (11252, 17, 1),
-    # Session 14: HITL sufficient-set bisect on osc_probe_w13b13_patch
-    # identified w10869/b17 as load-bearing (D2 = 0 with it set, 67655 cleared).
-    # sym_bucket6 confirms it's `CONST 0` across all 184 paired vendor designs.
-    # Open writes 1 because the slice-A LUT1 input's pin assignment routes
-    # through physical pin A1 (producing 0x5555... INIT) while vendor uses
-    # pin A3 (0x0f0f... INIT); fixing the underlying placer pin convention
-    # would also clear it, but the constant-zero overlay is universally safe.
-    (10869, 17, 0),
 )
 
 

@@ -86,7 +86,8 @@ POOL_MAP = (1, 3, 0, 2)
 
 
 def pool_inputs(g, routing):
-    """[[sx, sy, pin, lut_input]] for every routed pool pin (pin % 6 < 4)."""
+    """[[sx, sy, pin, lut_input]] for every routed pool pin (pin % 6 < 4) of
+    an L0 site; an L1 half-site's pins each have their own feeder."""
     by_site_pin = {}
     for node in g.nodes[N_SM:]:
         by_site_pin.setdefault((node.site, node.pin), []).append(node.nid)
@@ -102,6 +103,8 @@ def pool_inputs(g, routing):
             site = pin.site
             fanin = [f for n in by_site_pin[(site, pin.pin - pin.pin % 6)]
                      for f, _w in g.radj.get(n, [])]
+            if len(fanin) == 1:
+                continue      # an L1 half-site pin has one direct feeder: no pool
             if src not in fanin:
                 sys.exit(f"pool pin {pin.pin} of {site} fed by a node outside its fan-in")
             sx, sy = (int(v) for v in re.match(r"(\d+),(\d+)", site).groups())

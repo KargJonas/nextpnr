@@ -137,6 +137,11 @@ void SLG47910Impl::preRoute()
     // causing the heuristic to prune valid paths. Router2 (PathFinder-style)
     // completes blinky in 0.04 s; router1's BFS fallback takes 1000+ seconds.
     ctx->settings[ctx->id("router")] = std::string("router2");
+    // router2 keeps a net inside its bounding box plus a margin (default 3).
+    // Pads sit on the array edge, where a net can need a detour further out;
+    // with the default margin such a net never resolves its overuse.
+    ctx->settings[ctx->id("router2/bbMargin/x")] = std::string("8");
+    ctx->settings[ctx->id("router2/bbMargin/y")] = std::string("8");
 
     // An output pad's enable is a constant, set in the IOB's own config (its
     // O1/SR/CE selects, as the vendor does); it is not routed through the fabric.
@@ -207,6 +212,8 @@ bool SLG47910Impl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
     CellInfo *bound = ctx->getBoundBelCell(bel);
     if (bound == nullptr) return true;
+
+    if (!isValidBelForCellType(bound->type, bel)) return false;
 
     // BEL-exclusivity conflicts (L0/L1 overlap, RAM/SRL/FF exclusion).
     auto it = bel_conflicts.find(bel);
@@ -404,7 +411,13 @@ IdString SLG47910Impl::getBelBucketForCellType(IdString cell_type) const
 
 bool SLG47910Impl::isValidBelForCellType(IdString cell_type, BelId bel) const
 {
-    return (getBelBucketForCellType(cell_type) == ctx->getBelType(bel));
+    if (getBelBucketForCellType(cell_type) != ctx->getBelType(bel))
+        return false;
+    // Plain logic stays on the L0 view of a tile; the L1 view (z >= 8) is for
+    // memory cells, and a design placed there stayed silent on silicon.
+    if ((cell_type == id_SLG_LUT || cell_type == id_SLG_FF) && ctx->getBelLocation(bel).z >= 8)
+        return false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +497,10 @@ std::string SLG47910Impl::json_escape(const std::string &s)
     return out;
 }
 
-// SLG47910 STQFN-24 package: GPIO name → fabric IOB (gx, gy).
+// SLG47910 STQFN-24 package: GPIO name → the vendor's name for its IOB,
+// RBB_<row>_<col>, as (row, col); the IOB is at graph (x=col, y=row).
 // Derived from the vendor io_spec (SoC-level IOB bonding table).
-// GPIO[0:7] are on the west edge (gx=0), GPIO[8:18] on the east (gx=31).
+// GPIO[0:7] are on the south edge (row 0), GPIO[8:18] on the north (row 31).
 // GPIO[3:6] double as SPI pins during configuration.
 const std::map<std::string, std::pair<int,int>> &SLG47910Impl::gpio_name_to_coord()
 {

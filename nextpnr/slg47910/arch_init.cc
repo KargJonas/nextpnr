@@ -920,7 +920,11 @@ void SLG47910Impl::load_pin_constraints()
                           pin_constraints_path.c_str(), lineno);
         }
 
-        auto coord = std::make_pair(gx, gy);
+        // The two numbers are the vendor's IOB name RBB_<row>_<col>, so the IOB
+        // sits at graph (x=col, y=row): GPIO10 = RBB_31_25 is the north-edge IOB
+        // at (25,31) (the vendor routes GPIO10 there; chip_def lists GPIO8..15 as
+        // fixed IOs (8..27, 31)).
+        auto coord = std::make_pair(gy, gx);
         auto bel_it = iob_bels_by_coord.find(coord);
         if (bel_it == iob_bels_by_coord.end())
             log_error("slg47910: %s:%d: (%d,%d) is not an SLG47910 IOB site\n",

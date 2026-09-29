@@ -20,6 +20,10 @@ Physical architecture:
 import json
 import sys
 import argparse
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bitgen import coords  # noqa: E402
 
 # Coordinate mapping: (sx, sy, site_type) → RBB name.
 # rbb_x = 3*sy + 1 (interior columns: 1,4,7,10,13,16,19,22,25,28)
@@ -237,50 +241,6 @@ _WEST_IOB_OUTPUT_NVM_BITS = {
     },
 }
 
-# East-edge constant-output mode recovered from PMOD constant-output HITL
-# probes.  Vendor uses direct IOB value/control bits for constants rather than
-# routing GND/VCC through the side-edge mux branches.  The value bit is
-# active-low: 1 drives low, 0 drives high.
-_EAST_IOB_CONST_VALUE_BITS = {
-    27: (10979, 18),
-    26: (10979, 31),
-    25: (10980, 10),
-    24: (10980, 9),
-    23: (10981, 4),
-    22: (10981, 3),
-    9: (10985, 26),
-    8: (10985, 25),
-}
-
-# Additional constant-mode control bits.  The Y14 bit is one per pad and all
-# tested values require it cleared.  The Y1 bank has two controls per pad,
-# also cleared in every passing constant-output overlay.
-_EAST_IOB_CONST_LOW_ENABLE_BITS = {
-    27: [(11067, 18)],
-    26: [(11067, 31)],
-    25: [(11068, 10)],
-    24: [(11068, 9)],
-    23: [(11069, 4)],
-    22: [(11069, 3)],
-    9: [(11073, 26)],
-    8: [(11073, 25)],
-}
-
-_EAST_IOB_CONST_MODE_BITS = {
-    27: [(10924, 20), (10925, 13)],
-    26: [(10924, 19), (10924, 29)],
-    25: [(10925, 24), (10926, 7)],
-    24: [(10925, 8), (10925, 23)],
-    23: [(10926, 1), (10926, 2)],
-    22: [(10924, 30), (10925, 14)],
-    9: [(10930, 29), (10930, 30)],
-    8: [(10930, 24), (10931, 7)],
-}
-
-_EAST_IOB_CONST_MODE_SET_BITS = {
-    27: [(10955, 16)],
-}
-
 # East-edge dynamic-output mode recovered by HITL bit-minimization and a
 # 32-variant MODE-bit sweep on 2026-05-19/20.  When an east-edge output IOB
 # is fed from fabric (i.e. its net is not $PACKER_GND/$PACKER_VCC), the IOB
@@ -312,22 +272,17 @@ _EAST_IOB_CONST_MODE_SET_BITS = {
 # nextpnr routes OE through any branch other than BSEL.  The override is
 # applied via the direct-NVM tier in pack.py so it trumps the conflicting
 # edge-mux write.
-_EAST_IOB_DYN_DRIVE_BITS = {
-    8:  [(10931, 7, 0)],
-    9:  [(10930, 30, 0), (11040, 26, 0)],
-    22: [(10925, 14, 0)],
-    23: [(10926, 1, 0)],
-    24: [(10925, 23, 0)],
-    # gy=25: (11068, 10, 0) is the same bit _EAST_IOB_CONST_LOW_ENABLE_BITS
-    # clears for constants — it ALSO needs to be cleared in dynamic mode.
-    # Verified on two vendor probes (osc_probe at RBB_28_26 with a fabric-driven
-    # gy=25 IOB; oe_probe_gy25, the counter16 dyn-drive sweep variant). Both
-    # carry (11068, 10) = 0 in the vendor bitstream while the open flow
-    # previously left it at the empty default of 1.
-    25: [(10925, 24, 0), (11068, 10, 0)],
-    26: [(10924, 29, 0)],
-    27: [(10924, 20, 0)],
-}
+# Row-31 pad -> (tile, bl) of its enable bits: the pad's own tile at bl9 when
+# it is single, else the even tile of its pair (8/9, 22/23, 24/25).
+_EAST_PAD_ENABLE_TILE = {6: (6, 9), 8: (8, 9), 9: (8, 10), 22: (22, 9), 23: (22, 10),
+                         24: (24, 9), 25: (24, 10), 26: (26, 9), 27: (27, 9)}
+
+
+def _word_bit(x, y, bl, wl):
+    """Trace (x, y, BL, WL) -> (word, bit) of the raw image."""
+    return coords.trace_to_word_bit(x, y, bl, wl)
+
+
 
 # Vendor-grounded single-RBB RAM32X1D WE cases observed in the local corpus.
 # Alias-driven cases are described by logical topology; logically independent
@@ -625,33 +580,28 @@ def derive_edge_iob_output_nvm_bits(iob):
     gx, gy = key
     net = iob.get('net', '')
 
-    if gx == 31 and net in ('$PACKER_GND', '$PACKER_VCC'):
-        value_bit = _EAST_IOB_CONST_VALUE_BITS.get(gy)
-        if value_bit is None:
-            raise UnsupportedBackendFeature(
-                f"east-edge constant output at (31,{gy}) is not yet RE-backed"
-            )
-
-        value = 1 if net == '$PACKER_GND' else 0
-        bits = [(value_bit[0], value_bit[1], value)]
-        for reg, bit in _EAST_IOB_CONST_LOW_ENABLE_BITS.get(gy, []):
-            bits.append((reg, bit, 0))
-        for reg, bit in _EAST_IOB_CONST_MODE_BITS.get(gy, []):
-            bits.append((reg, bit, 0))
-        for reg, bit in _EAST_IOB_CONST_MODE_SET_BITS.get(gy, []):
-            bits.append((reg, bit, 1))
-        return bits
-
-    # East-edge dynamic (fabric-driven) outputs: emit the per-gy drive-enable
-    # bits.  Without these the IOB stays tri-stated and the pad reads as the
-    # external pull-up regardless of the routed mux selections.
+    # Fabric-driven outputs on the row-31 pads (the vendor's RBB_31_<col>; the
+    # IOB is at graph (col, 31)). Read from the vendor placer's own builds of
+    # one probe on each pad (Kraken harness eda-placer, design set pads):
+    #   own tile   bl7 wl1 = 0   enables the output driver
+    #              bl8 wl1 = 1   bypasses the IOB's output flip-flop (template)
+    #              bl4 wl26 = 0
+    #   enable tile bl9|10 wl14 = 0 and wl25 = 0
+    # The enable tile is the pad's own for a single pad (6, 26, 27) and the
+    # even tile of its pair for 8/9, 22/23, 24/25 (bl9 for the even pad, bl10
+    # for the odd one).
     if gx == 31:
-        dyn_bits = _EAST_IOB_DYN_DRIVE_BITS.get(gy)
-        if dyn_bits is None:
+        if net in ('$PACKER_GND', '$PACKER_VCC'):
             raise UnsupportedBackendFeature(
-                f"east-edge dynamic output at (31,{gy}) is not yet RE-backed"
-            )
-        return list(dyn_bits)
+                f"east-edge constant output at (31,{gy}) is not supported")
+        if gy not in _EAST_PAD_ENABLE_TILE:
+            raise UnsupportedBackendFeature(
+                f"east-edge output at (31,{gy}) is not RE-backed (GPIO16, 8-13 are)")
+        et, ebl = _EAST_PAD_ENABLE_TILE[gy]
+        return [(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
+                (*_word_bit(gy, 31, 4, 26), 0),
+                (*_word_bit(et, 31, ebl, 14), 0),
+                (*_word_bit(et, 31, ebl, 25), 0)]
 
     # West IOB constant outputs ($PACKER_GND / $PACKER_VCC): the
     # _WEST_IOB_OUTPUT_NVM_BITS entries were recovered from fabric-driven
@@ -1039,15 +989,12 @@ def emit_sdc(placement, out_file):
                     # ESEL=1 + XOR=1 in 616/640 of vendor positions (96.2%).
                     # When a LUT/RAM is present, keep XOR=0 (LUT output) unless
                     # explicitly carry.
+                    # XOR=1 (the XORCY path, S ^ CI with CI = 0) for every slice
+                    # but a carry CO output (MUXCY) or a RAM: the vendor's osc_probe
+                    # writes MUX_DI/XOR = 1 for its LUT1 -> FF slice, and with XOR=0
+                    # the flip-flop's D is the carry mux, not the LUT.
                     is_carry_co = lut is not None and lut.get('carry_co_output', False)
-                    if is_carry and not is_carry_co:
-                        xor_val = 1
-                    elif lut is None and ram is None:
-                        # Empty slice (with or without a FF) — vendor default
-                        # is XOR=1 in the overwhelming majority.
-                        xor_val = 1
-                    else:
-                        xor_val = 0
+                    xor_val = 0 if (is_carry_co or ram is not None) else 1
                     ff = ff_slices.get(sl)
                     ff_d_pin = ff.get('d_pin', -1) if ff is not None else -1
                     mux_i_pin = 16
@@ -1103,8 +1050,12 @@ def emit_sdc(placement, out_file):
                             )
                         new_init ^= (1 << 64) - 1
 
+                    # The truth tables sit in BC in reverse slice order: chunk 3
+                    # (BC[192:255]) is slice A, chunk 0 is slice D -- the vendor's
+                    # osc_probe keeps its slice-D inverter in BC[0:63] (its Q exits
+                    # through DQ), and eflx-port's LUT_ON gating says the same.
                     for bit in range(64):
-                        bc_idx = sl * 64 + bit
+                        bc_idx = (3 - sl) * 64 + bit
                         val = (new_init >> bit) & 1
                         f.write(f"set_case_analysis {val} {prefix}/BC[{bc_idx}]\n")
 
@@ -1166,33 +1117,29 @@ def emit_sdc(placement, out_file):
             # 0 = Clock_0, 1 = Clock_1.
             f.write(f"set_case_analysis {clk_sel_val} {prefix}/CLK_SEL\n")
 
-            # --- Slice-output mux state (8-FF model Phases 1+2) ---
-            # For each slice with a bound FF, emit:
-            #   * OAQ_SEL (3 bits, always emitted; default 010 = XQ feedback)
-            #   * AMX_SEL (5 bits A/B/C, 4 bits D) when an OXQ FF is bound
-            #   * AQ1_SEL (6 bits A/B/C, 5 bits D) when an XQ FF is bound
-            # pack.py's AQ1/AMX/OAQ_SEL tier maps these onto the per-RBB BC
-            # region; bits not emitted stay at template default.
+            # --- Slice-output mux state ---
+            # Every slice of a used block gets its three selects, from its FFs
+            # where it has them and the vendor's defaults otherwise: the vendor
+            # writes all four slices of every block it uses (osc_probe's .vm:
+            # OAQ_SEL 010, AMX_SEL 00010 / D 0001, AQ1_SEL 100000 / D 10000),
+            # and a flip-flop in slice D stays static while A-C keep the
+            # template's selects.
             sm_entries = slice_muxes_by_rbb.get((rbb_x, rbb_y), {})
-            for sl in sorted(sm_entries.keys()):
-                entry = sm_entries[sl]
+            for sl in range(4):
+                entry = sm_entries.get(sl, {})
                 letter = SLICE_LETTER[sl]
-                oaq_sel = int(entry.get('oaq_sel', 2))
-                for fb in range(3):
-                    bit = (oaq_sel >> fb) & 1
-                    f.write(f"set_case_analysis {bit} {prefix}/OAQ_SEL_{letter}[{fb}]\n")
-                if 'amx_sel' in entry:
-                    amx_sel = int(entry['amx_sel'])
-                    nbits = 4 if sl == 3 else 5  # slice D: 4 bits, others: 5
+                oaq_sel = int(entry.get('oaq_sel', 0b010))
+                amx_sel = int(entry.get('amx_sel', 0b0001 if sl == 3 else 0b00010))
+                aq1_sel = int(entry.get('aq1_sel', 0b10000 if sl == 3 else 0b100000))
+                for name, value, nbits in (('OAQ_SEL', oaq_sel, 3),
+                                           ('AMX_SEL', amx_sel, 4 if sl == 3 else 5),
+                                           ('AQ1_SEL', aq1_sel, 5 if sl == 3 else 6)):
                     for fb in range(nbits):
-                        bit = (amx_sel >> fb) & 1
-                        f.write(f"set_case_analysis {bit} {prefix}/AMX_SEL_{letter}[{fb}]\n")
-                if 'aq1_sel' in entry:
-                    aq1_sel = int(entry['aq1_sel'])
-                    nbits = 5 if sl == 3 else 6  # slice D: 5 bits (no EXTRA_IN)
-                    for fb in range(nbits):
-                        bit = (aq1_sel >> fb) & 1
-                        f.write(f"set_case_analysis {bit} {prefix}/AQ1_SEL_{letter}[{fb}]\n")
+                        f.write(f"set_case_analysis {(value >> fb) & 1} {prefix}/{name}_{letter}[{fb}]\n")
+            # One more block field the SDC has no name for: bl10 wl31 of the
+            # block's (col+1, row+1) tile, 0 in every block the vendor uses
+            # (1 in the template); with it at 1 the flip-flop never toggles.
+            emit_direct_nvm_bit(f, *_word_bit(rbb_y + 1, rbb_x + 1, 10, 31), 0)
 
         # --- Side-/north-edge IOB outputs ---
         # These use a different route-aware mux scheme than CLB rows. The
@@ -1270,6 +1217,11 @@ def main():
         placement = json.load(f)
     with open(args.lut_inputs) as f:
         land_on_lut_inputs(placement, json.load(f))
+    # nextpnr exports an IOB at its graph position (x, y); the IOB tables here
+    # key it the way the vendor names it, RBB_<row>_<col> = (y, x) -- GPIO10 is
+    # RBB_31_25, the north-edge IOB at graph (25, 31).
+    for iob in placement.get('iobs', []):
+        iob['gx'], iob['gy'] = iob['gy'], iob['gx']
 
     try:
         emit_sdc(placement, args.output)

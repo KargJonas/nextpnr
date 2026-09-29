@@ -1,0 +1,3 @@
+set_clk clk W0
+set_io q0 GPIO12
+set_io clk_en 0 25

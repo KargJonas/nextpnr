@@ -1,0 +1,4 @@
+set_io q[0] GPIO8
+set_io q[1] GPIO9
+set_io q[2] GPIO10
+set_io q[3] GPIO11

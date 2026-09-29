@@ -6,3 +6,5 @@ set_io led GPIO11
 set_io la[0] GPIO8
 set_io la[1] GPIO9
 set_io la[2] GPIO10
+# The oscillator's enable pad.
+set_io clk_en 0 25
