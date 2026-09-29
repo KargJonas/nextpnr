@@ -90,22 +90,45 @@ files are byte-identical; the generated chipdb matches shrike's exactly).
 
 ## Status
 
-Working: the whole flow from Verilog to an SPI image for any design in the
-supported subset, in one container; the hardware loop (flash + capture).
-Not yet working: **no bitstream from this flow runs on silicon yet.** The ring
-probe still settles, and its pad values do not change when the LUT truth
-tables do, so a defect remains between the LUT and the output pad. The board
-LED's pad (GPIO16) has no recovered output configuration yet, so
-`designs/blinky` drives a PMOD pin instead.
+On silicon (Shrike, 50 MHz oscillator on W0): a toggle flip-flop and its LUT
+run at **every one of the 140 L0 sites**, one site per bitstream, with nextpnr
+placing and routing the rest; a freely placed toggle flip-flop runs; a LUT4
+passes its input through on each of the four inputs of each of the four
+slices; a 4-bit counter built from LUTs counts on its low bits. Output pads
+GPIO8-10 and 12-15 work from the fabric.
+
+How the dead sites were found, each by comparing with a vendor build Kraken
+made of the same kind of design:
+
+- Two switch-matrix dispatch bugs carried over from eflx-port (level-3
+  down-turns from any source but a level-5 line; level-1 down-turns fed by
+  level-3 branch >= 4): 497/512 and 296/4170 routed muxes wrong against the
+  vendor's own routes, now 1 and 73 (the rest timing choices).
+- Memory CLB rows (6/8/22/24) keep a column-dependent RAM default in BL4
+  WL26-30 that the vendor clears for plain logic.
+- CLK_SEL has a second copy in each RBB's middle tile (BL10 WL24 or WL31 by
+  column class); the template's 1 there left columns 19 and 25 unclocked.
+  Found by a vendor 256-flip-flop Johnson counter spanning the array: our
+  encoding of its placement ran only once the vendor's unwritten bits were
+  grafted onto a dead RBB, and this one bit sufficed.
+
+Not yet working: anything using the carry chain (the blinky counter) and any
+LUT input or flip-flop D that enters a site through its eight shared pins.
+The vendor's 25-bit counter runs on the board; ours does not, because (a) the
+uarch chains carries from row to row where the silicon chains them column to
+column (RBB_10_16 -> RBB_13_16 -> ...), (b) CIN_SEL (BL10 WL17 of the middle
+tile, both rows) is never written, and (c) the shared-pin muxes (MUX_x5,
+MUX_x6, MUX_xI) are one-hot over four inputs but emit_sdc writes the site
+pin number into them in binary.
 
 ## Next steps
 
-1. **Vendor as oracle at a matched placement.** Build the same probe with the
-   vendor tool, forced to the same placement (Kraken's harness runs the vendor
-   tool), and diff family by family with eflx-port's attribution. That turns
-   "the pad is wrong" into "these bits are wrong", instead of flipping bits.
-2. Combinational path, then flip-flops with the W0 clock entry, then the carry
-   chain: the 25-bit counter in `designs/blinky` (it builds today) blinking a pin.
-3. Compensate level-13 inversions the way the vendor does (LUT truth table,
-   IOB value bits), port the IOB encoder from the decompile, and recover
-   GPIO16's output configuration from one vendor build -- then the board LED.
+1. Carry: chain RBB column to column in the uarch, write CIN_SEL, and compute
+   S inside the LUT from its dedicated inputs with MUX_x5/x6 idle, as the
+   vendor does; then the 25-bit counter and the board LED (GPIO16).
+2. Shared pins: recover which of the eight shared site pins each one-hot
+   select of MUX_x5/x6/xI picks (vendor packed instances give the net on
+   each port; the routes give the delivering node), and restrict the uarch to
+   the pins each mux can reach.
+3. The east-edge IOB and GPIO11: the vendor drives GPIO11 on this board; our
+   pad configuration for it is still wrong.

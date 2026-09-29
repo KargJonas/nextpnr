@@ -8,8 +8,9 @@ switch-matrix encoder ported from the vendor placer) -- into one flow over one
 device model. The briefing in [`docs/briefing.md`](docs/briefing.md) explains
 how it came about and where it stands.
 
-**Status: builds bitstreams for any design in the supported subset; none of
-them runs on silicon yet.** See the briefing's "Status" and "Next steps".
+**Status: runs on silicon for LUT and flip-flop logic at every L0 site; the
+carry chain and the shared site pins do not work yet.** See the briefing's
+"Status" and "Next steps".
 
 ## Use
 
