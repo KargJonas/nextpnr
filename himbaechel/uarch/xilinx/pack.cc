@@ -90,8 +90,10 @@ void XilinxPacker::xform_cell(const dict<IdString, XFormRule> &rules, CellInfo *
     for (auto &param : ci->params)
         if (rule.param_xform.count(param.first))
             xform_params.push_back(param.first);
-    for (auto param : xform_params)
-        ci->params[rule.param_xform.at(param)] = ci->params[param];
+    for (auto param : xform_params) {
+        auto param_value = ci->params[param];
+        ci->params[rule.param_xform.at(param)] = param_value;
+    }
 
     for (auto &attr : rule.set_attrs)
         ci->attrs[attr.first] = attr.second;
@@ -401,7 +403,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     auto process_cell = [&](const CellInfo *cell) {
         if (cell->constr_x != lut->constr_x || cell->constr_y != lut->constr_y)
             return;
-        if (cell->type == id_SLICE_LUTX && cell->getPort(id_CLK)) {
+        if (cell->type == id_SLICE_LUTX && (bool_or_default(cell->attrs, id_X_LUT_AS_SRL) || bool_or_default(cell->attrs, id_X_LUT_AS_DRAM))) {
             found_wclk = true;
             clk = cell->getPort(id_CLK);
             wclk_inv = bool_or_default(cell->params, id_IS_WCLK_INVERTED, false);
@@ -1407,6 +1409,22 @@ void XC7Packer::constrain_bram_cascades()
 
 void XilinxPacker::pack_inverters()
 {
+    // Rewrite inverted clocks
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        for (auto &port : ci->ports) {
+            if (!port.first.in(id_WCLK, id_CLKARDCLK, id_CLKBWRCLK))
+                continue;
+            NetInfo *net = port.second.net;
+            if (!net || !net->driver.cell || net->driver.cell->type != id_INV)
+                continue;
+            CellInfo *inv = net->driver.cell;
+            bool already_inverted = bool_or_default(ci->params, ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx)), false);
+            ci->disconnectPort(port.first);
+            ci->connectPort(port.first, inv->getPort(id_I));
+            ci->params[ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx))] = Property(already_inverted ? 0 : 1);
+        }
+    }
     // Fold an inverter driving a PLL/MMCM control pin into that pin's
     // IS_<pin>_INVERTED parameter, which is what Vivado does.
     //
