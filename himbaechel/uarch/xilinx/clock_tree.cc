@@ -60,9 +60,11 @@ const XilinxImpl::ClockTreeRates clock_tree_rates[] = {
 
 bool XilinxImpl::clock_rates_measured() const
 {
-    for (const auto &r : clock_tree_rates)
-        if (chipdb_die == r.die)
+    for (const auto &r : clock_tree_rates) {
+        const bool die_is_measured = chipdb_die == r.die;
+        if (die_is_measured)
             return true;
+    }
     return false;
 }
 
@@ -70,18 +72,23 @@ void XilinxImpl::init_clock_tree()
 {
     std::string mode =
             ctx->args.options.count("clock-tree") ? ctx->args.options.at("clock-tree").as<std::string>() : "on";
-    if (mode == "off")
+    const bool mode_is_off = mode == "off";
+    if (mode_is_off)
         return;
     const ClockTreeRates *rates = nullptr;
-    for (const auto &r : clock_tree_rates)
-        if (chipdb_die == r.die)
+    for (const auto &r : clock_tree_rates) {
+        const bool die_is_measured = chipdb_die == r.die;
+        if (die_is_measured)
             rates = &r;
-    if (rates == nullptr && mode != "force") {
+    }
+    const bool unmeasured_and_not_forced = rates == nullptr && mode != "force";
+    if (unmeasured_and_not_forced) {
         log_info("clock-tree: no clock delays measured for %s, global clocks keep their routed delay\n",
                  chipdb_die.c_str());
         return;
     }
-    if (rates == nullptr) {
+    const bool borrowing_measured_die = rates == nullptr;
+    if (borrowing_measured_die) {
         rates = &clock_tree_rates[0];
         log_warning("clock-tree: no clock delays measured for %s, using %s's\n", chipdb_die.c_str(), rates->die);
     }
@@ -113,7 +120,8 @@ void XilinxImpl::init_clock_tree()
     ct_centre_y = float(sum) / bufg_rows.size();
     for (auto bel : ctx->getBels()) {
         const std::string type = ctx->getBelType(bel).str(ctx);
-        if (type.rfind("BUFGCTRL", 0) == 0)
+        const bool is_bufgctrl = type.rfind("BUFGCTRL", 0) == 0;
+        if (is_bufgctrl)
             ct_bufg_bel_types.insert(ctx->getBelType(bel));
     }
     ct_enabled = true;
@@ -141,9 +149,11 @@ delay_t XilinxImpl::clock_tree_delay_at(int x, int y, bool bram_clock_pin) const
     // then 160-172 ps a row.  Counting the sink's own row as well would add
     // the same 170 ps to every sink, a constant and no skew.
     int region_row = ct_region_rows.front();
-    for (int r : ct_region_rows)
-        if (std::abs(r - y) < std::abs(region_row - y))
+    for (int r : ct_region_rows) {
+        const bool nearer = std::abs(r - y) < std::abs(region_row - y);
+        if (nearer)
             region_row = r;
+    }
     const float region_offset = region_row - ct_centre_y;
     int rows_away = 0;
     for (int r : ct_region_rows) {
@@ -161,7 +171,8 @@ delay_t XilinxImpl::clock_tree_delay_at(int x, int y, bool bram_clock_pin) const
 
 delay_t XilinxImpl::clock_tree_delay(BelId sink) const
 {
-    if (!ct_enabled || sink == BelId())
+    const bool tree_off_or_no_sink = !ct_enabled || sink == BelId();
+    if (tree_off_or_no_sink)
         return 0;
     int x, y;
     tile_xy(ctx->chip_info, sink.tile, x, y);
@@ -174,7 +185,8 @@ bool XilinxImpl::getArcDelayOverride(const NetInfo *net_info, const PortRef &sin
         return false;
     const CellInfo *driver = net_info->driver.cell;
     const bool driven_by_a_bufg = driver != nullptr && is_global_clock_bel(driver->bel);
-    if (!driven_by_a_bufg || sink.cell == nullptr)
+    const bool not_a_bufg_sink = !driven_by_a_bufg || sink.cell == nullptr;
+    if (not_a_bufg_sink)
         return false;
     // Each of the port's sink wires as Context::getNetinfoRouteDelayQuad
     // takes it -- the routed delay where it is routed, the prediction where
@@ -182,7 +194,8 @@ bool XilinxImpl::getArcDelayOverride(const NetInfo *net_info, const PortRef &sin
     // for a BUFG source) carries the insertion delay already
     const delay_t insertion = clock_tree_delay(sink.cell->bel);
     WireId src_wire = ctx->getNetinfoSourceWire(net_info);
-    if (src_wire == WireId())
+    const bool source_unrouted = src_wire == WireId();
+    if (source_unrouted)
         return false;
     bool found = false;
     DelayQuad result(std::numeric_limits<delay_t>::max(), std::numeric_limits<delay_t>::lowest());
@@ -191,7 +204,8 @@ bool XilinxImpl::getArcDelayOverride(const NetInfo *net_info, const PortRef &sin
         DelayQuad d{0};
         while (cursor != WireId() && cursor != src_wire) {
             auto it = net_info->wires.find(cursor);
-            if (it == net_info->wires.end() || it->second.pip == PipId())
+            const bool hop_unrouted = it == net_info->wires.end() || it->second.pip == PipId();
+            if (hop_unrouted)
                 break;
             d = d + ctx->getPipDelay(it->second.pip) + ctx->getWireDelay(cursor);
             cursor = ctx->getPipSrcWire(it->second.pip);
@@ -216,7 +230,8 @@ bool XilinxImpl::getArcDelayOverride(const NetInfo *net_info, const PortRef &sin
 
 delay_t XilinxImpl::predict_clock_tree_delay(BelId src_bel, BelId dst_bel) const
 {
-    if (!ct_enabled || !is_global_clock_bel(src_bel))
+    const bool tree_off_or_not_global = !ct_enabled || !is_global_clock_bel(src_bel);
+    if (tree_off_or_not_global)
         return -1;
     // The source's own site adds nothing: every BUFGCTRL of a 7-series die
     // sits in the one CLK_BUFG column at the centre the rates were measured

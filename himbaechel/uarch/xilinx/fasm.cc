@@ -1592,7 +1592,8 @@ struct FasmBackend
                     // right-hand side.  The database's LIOB18 LVDS.IN_DIFF key
                     // clears one of them (!38_126), so the SSTL key is the one
                     // that matches; nothing on the N half.
-                    if (yLoc == 0) {
+                    const bool is_p_half = yLoc == 0;
+                    if (is_p_half) {
                         write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
                         if (!is_output)
                             write_bit("IBUF_HP_BANK_GLUE");
@@ -2340,7 +2341,8 @@ struct FasmBackend
         }
 
         int width = this_width;
-        if (width == 0) {
+        const bool width_unset = width == 0;
+        if (width_unset) {
             // A port the design never uses keeps its width field clear, the
             // _1 encoding.  That is what Vivado writes for an instantiated
             // RAMB with a port width of 0, decoded from its bitstreams: on

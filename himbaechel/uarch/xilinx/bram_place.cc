@@ -91,14 +91,16 @@ bool XilinxImpl::place_brams_by_group()
 {
     std::string mode =
             ctx->args.options.count("bram-place") ? ctx->args.options.at("bram-place").as<std::string>() : "on";
-    if (mode == "off")
+    const bool mode_is_off = mode == "off";
+    if (mode_is_off)
         return false;
     // The cost of a site is its estimated delay plus the clock tree's extra
     // insertion delay there, and the second placement pass costs run time and
     // often Fmax; both are measured on the xc7vx485t only.  Elsewhere the skew
     // term would be zero and the pass is untested, so it is left out unless
     // forced, as the clock model is.
-    if (mode != "force" && !clock_rates_measured()) {
+    const bool unmeasured_and_not_forced = mode != "force" && !clock_rates_measured();
+    if (unmeasured_and_not_forced) {
         log_info("bram-place: no clock delays measured for %s, block RAMs keep the heap placement "
                  "(-o bram-place=force to run it)\n",
                  chipdb_die.c_str());
@@ -109,12 +111,14 @@ bool XilinxImpl::place_brams_by_group()
     dict<IdString, int> index_of;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        if (is_movable_bram(ci)) {
+        const bool movable = is_movable_bram(ci);
+        if (movable) {
             index_of[ci->name] = brams.size();
             brams.push_back(ci);
         }
     }
-    if (int(brams.size()) < min_brams)
+    const bool too_few_brams = int(brams.size()) < min_brams;
+    if (too_few_brams)
         return false;
 
     // Group: block RAMs whose data-output cones meet.  The cones grow a level
@@ -128,7 +132,8 @@ bool XilinxImpl::place_brams_by_group()
         a = find_root(parent, a);
         b = find_root(parent, b);
         const bool both_complete = group_size[a] >= complete_group && group_size[b] >= complete_group;
-        if (a == b || both_complete)
+        const bool same_or_both_complete = a == b || both_complete;
+        if (same_or_both_complete)
             return;
         parent[a] = b;
         group_size[b] += group_size[a];
@@ -137,17 +142,22 @@ bool XilinxImpl::place_brams_by_group()
     std::vector<std::vector<CellInfo *>> frontier(brams.size()), registers(brams.size()), logic(brams.size());
     auto users_of_outputs = [&](CellInfo *ci, bool data_outputs_only, std::vector<CellInfo *> &out) {
         for (auto &port : ci->ports) {
-            if (port.second.type != PORT_OUT || port.second.net == nullptr)
+            const bool not_a_driven_output = port.second.type != PORT_OUT || port.second.net == nullptr;
+            if (not_a_driven_output)
                 continue;
             const bool is_data_output = port.first.str(ctx).rfind("DO", 0) == 0;
-            if (data_outputs_only && !is_data_output)
+            const bool skip_non_data_output = data_outputs_only && !is_data_output;
+            if (skip_non_data_output)
                 continue;
             NetInfo *net = port.second.net;
-            if (net->users.entries() > cone_max_fanout)
+            const bool fanout_too_wide = net->users.entries() > cone_max_fanout;
+            if (fanout_too_wide)
                 continue;
-            for (auto &usr : net->users)
-                if (usr.cell != nullptr && usr.cell->bel != BelId())
+            for (auto &usr : net->users) {
+                const bool user_is_placed = usr.cell != nullptr && usr.cell->bel != BelId();
+                if (user_is_placed)
                     out.push_back(usr.cell);
+            }
         }
     };
     for (size_t i = 0; i < brams.size(); i++)
@@ -156,10 +166,12 @@ bool XilinxImpl::place_brams_by_group()
         for (size_t i = 0; i < brams.size(); i++) {
             std::vector<CellInfo *> next;
             for (auto *ci : frontier[i]) {
-                if (ci->type.in(id_RAMB36E1_RAMB36E1, id_RAMB18E1_RAMB18E1))
+                const bool is_block_ram = ci->type.in(id_RAMB36E1_RAMB36E1, id_RAMB18E1_RAMB18E1);
+                if (is_block_ram)
                     continue;
                 auto other = reached_from.find(ci->name);
-                if (other != reached_from.end()) {
+                const bool already_reached = other != reached_from.end();
+                if (already_reached) {
                     // reached already, by another block RAM (whose cone it now
                     // continues) or by another path from this one
                     join(i, other->second);
@@ -178,15 +190,18 @@ bool XilinxImpl::place_brams_by_group()
     // mux logic on the way followed the block RAMs in the first placement, so
     // is only the anchor when no register is reached.
     std::vector<std::vector<CellInfo *>> &consumers = registers;
-    for (size_t i = 0; i < brams.size(); i++)
-        if (consumers[i].empty())
+    for (size_t i = 0; i < brams.size(); i++) {
+        const bool no_register_reached = consumers[i].empty();
+        if (no_register_reached)
             consumers[i] = logic[i];
+    }
 
     dict<int, int> group_of_root;
     std::vector<BramGroup> groups;
     for (size_t i = 0; i < brams.size(); i++) {
         int root = find_root(parent, i);
-        if (!group_of_root.count(root)) {
+        const bool root_is_new = !group_of_root.count(root);
+        if (root_is_new) {
             group_of_root[root] = groups.size();
             groups.emplace_back();
         }
@@ -203,7 +218,9 @@ bool XilinxImpl::place_brams_by_group()
                 n++;
             }
         }
-        if (n == 0) { // nothing reads it (yet): keep it near where it is
+        // nothing reads it (yet): keep it near where it is
+        const bool nothing_reads_it = n == 0;
+        if (nothing_reads_it) {
             for (auto *ci : g.members) {
                 Loc l = ctx->getBelLocation(ci->bel);
                 sx += l.x;
@@ -221,7 +238,8 @@ bool XilinxImpl::place_brams_by_group()
     auto site_cost = [&](const BramGroup &g, BelId bel) {
         Loc l = ctx->getBelLocation(bel);
         delay_t route = delay_matrix_lookup(int(g.tx + 0.5f) - l.x, int(g.ty + 0.5f) - l.y);
-        if (route < 0)
+        const bool route_unknown = route < 0;
+        if (route_unknown)
             route = 30 * std::abs(l.x - g.tx) + 20 * std::abs(l.y - g.ty);
         delay_t skew = clock_tree_delay(bel) - clock_tree_delay_at(int(g.tx + 0.5f), int(g.ty + 0.5f), false);
         return route + std::max<delay_t>(0, skew);
@@ -232,12 +250,15 @@ bool XilinxImpl::place_brams_by_group()
         ctx->unbindBel(ci->bel);
     dict<IdString, std::vector<BelId>> bels_for_type;
     for (auto *ci : brams) {
-        if (bels_for_type.count(ci->type))
+        const bool type_already_listed = bels_for_type.count(ci->type);
+        if (type_already_listed)
             continue;
         auto &v = bels_for_type[ci->type];
-        for (auto bel : ctx->getBels())
-            if (ctx->isValidBelForCellType(ci->type, bel))
+        for (auto bel : ctx->getBels()) {
+            const bool bel_matches_type = ctx->isValidBelForCellType(ci->type, bel);
+            if (bel_matches_type)
                 v.push_back(bel);
+        }
     }
     for (auto &g : groups) {
         // a group of mixed types takes the sites of its first member's type,
@@ -255,10 +276,12 @@ bool XilinxImpl::place_brams_by_group()
               [](const BramGroup &a, const BramGroup &b) { return a.members.size() > b.members.size(); });
 
     auto try_bind = [&](CellInfo *ci, BelId bel) {
-        if (!ctx->checkBelAvail(bel) || !ctx->isValidBelForCellType(ci->type, bel))
+        const bool site_taken_or_wrong_type = !ctx->checkBelAvail(bel) || !ctx->isValidBelForCellType(ci->type, bel);
+        if (site_taken_or_wrong_type)
             return false;
         ctx->bindBel(bel, ci, STRENGTH_USER);
-        if (!ctx->isBelLocationValid(bel)) {
+        const bool location_invalid = !ctx->isBelLocationValid(bel);
+        if (location_invalid) {
             ctx->unbindBel(bel);
             return false;
         }
@@ -268,7 +291,8 @@ bool XilinxImpl::place_brams_by_group()
     while (growing) {
         growing = false;
         for (auto &g : groups) {
-            if (g.placed == g.members.size())
+            const bool group_is_full = g.placed == g.members.size();
+            if (group_is_full)
                 continue;
             growing = true;
             CellInfo *ci = g.members.at(g.placed);
@@ -276,9 +300,12 @@ bool XilinxImpl::place_brams_by_group()
             while (!bound && g.next < g.candidates.size())
                 bound = try_bind(ci, g.candidates.at(g.next++));
             if (!bound) { // the group's own type ran out of sites: any free one of this cell's type
-                for (auto bel : bels_for_type.at(ci->type))
-                    if ((bound = try_bind(ci, bel)))
+                for (auto bel : bels_for_type.at(ci->type)) {
+                    // the initializer assigns bound from try_bind; the if tests it, one site at a time
+                    const bool bound_this_site = (bound = try_bind(ci, bel));
+                    if (bound_this_site)
                         break;
+                }
             }
             if (!bound)
                 log_error("bram-place: no free site for block RAM '%s'\n", ctx->nameOf(ci));
@@ -304,7 +331,8 @@ bool XilinxImpl::place_brams_by_group()
 
 void XilinxImpl::replace_around_brams()
 {
-    if (!place_brams_by_group())
+    const bool groups_not_placed = !place_brams_by_group();
+    if (groups_not_placed)
         return;
     // Everything else the placer put down is placed again around them
     int lifted = 0;
@@ -320,7 +348,8 @@ void XilinxImpl::replace_around_brams()
     PlacerHeapCfg cfg(ctx);
     configurePlacerHeap(cfg);
     cfg.ioBufTypes.insert(ctx->id("GENERIC_IOB"));
-    if (!placer_heap(ctx, cfg))
+    const bool second_pass_failed = !placer_heap(ctx, cfg);
+    if (second_pass_failed)
         log_error("bram-place: the second placement failed\n");
 }
 

@@ -921,14 +921,16 @@ void XilinxImpl::postPlace()
     // 30), with the measured delay matrix giving its estimates.  Off unless asked for, until it is measured on xc7
     // (docs/physopt-pass-proposal.md in the tools repository).
     replace_around_brams();
-    if (ctx->args.options.count("timing-opt")) {
+    const bool timing_opt_asked = ctx->args.options.count("timing-opt");
+    if (timing_opt_asked) {
         std::string v = ctx->args.options.at("timing-opt").as<std::string>();
         TimingOptCfg cfg(ctx);
         cfg.cellTypes.insert(id_SLICE_LUTX);
         cfg.cellTypes.insert(id_SLICE_FFX);
         cfg.radius = std::max(1, std::atoi(v.c_str()));
         auto comma = v.find(',');
-        if (comma != std::string::npos)
+        const bool has_iterations = comma != std::string::npos;
+        if (has_iterations)
             cfg.iterations = std::max(1, std::atoi(v.c_str() + comma + 1));
         log_info("timing-opt: radius %d tiles, %d rounds\n", cfg.radius, cfg.iterations);
         timing_opt(ctx, cfg);
@@ -1711,7 +1713,8 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
     if (!both_bels_known)
         return 0;
     delay_t clock_tree = predict_clock_tree_delay(src_bel, dst_bel);
-    if (clock_tree >= 0)
+    const bool clock_tree_applies = clock_tree >= 0;
+    if (clock_tree_applies)
         return clock_tree;
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
