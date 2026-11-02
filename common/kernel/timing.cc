@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <boost/range/adaptor/reversed.hpp>
 #include <deque>
+#include <limits>
 #include <map>
 #include <utility>
 #include "util.h"
@@ -612,6 +613,30 @@ void TimingAnalyser::walk_forward()
     }
 }
 
+// set_multicycle_path -setup N on the endpoint's cell (NEXTPNR_MCP_SETUP, set by
+// the xilinx XDC parser): the capture edge moves N-1 periods later. 1 if not
+// tagged or the capture clock has no period constraint.
+static int setup_multicycle(const Context *ctx, IdString cell, IdString clock)
+{
+    if (cell == IdString() || clock == IdString() || !ctx->cells.count(cell) || !ctx->nets.count(clock))
+        return 1;
+    if (!ctx->nets.at(clock)->clkconstr)
+        return 1;
+    const auto &attrs = ctx->cells.at(cell)->attrs;
+    auto mcp = attrs.find(ctx->id("NEXTPNR_MCP_SETUP"));
+    if (mcp == attrs.end())
+        return 1;
+    const Property &n = mcp->second;
+    int64_t cycles = n.is_string ? std::strtoll(n.as_string().c_str(), nullptr, 10) : n.as_int64();
+    cycles = std::max<int64_t>(1, cycles);
+    // Keep (N-1) periods well inside delay_t; a larger N leaves no setup check anyway.
+    delay_t period = ctx->nets.at(clock)->clkconstr->period.minDelay();
+    delay_t limit = std::numeric_limits<delay_t>::max() / 4;
+    if (period > 0 && cycles - 1 > limit / period)
+        cycles = 1 + int64_t(limit / period);
+    return int(cycles);
+}
+
 void TimingAnalyser::walk_backward()
 {
     // Assign initial required time to domain endpoints
@@ -639,27 +664,11 @@ void TimingAnalyser::walk_backward()
                 }
                 clock_key = CellPortKey(ep.first.cell, ep.second);
             }
-            // set_multicycle_path -setup: relax the capture requirement by
-            // (mcp-1) additional clock periods on tagged endpoints
-            // (port of nextpnr-xilinx 813bb715's timing-walk support).
-            {
-                IdString mcp_attr = ctx->id("NEXTPNR_MCP_SETUP");
-                int mcp = 1;
-                CellInfo *ep_cell = nullptr;
-                bool endpoint_cell_exists = ep.first.cell != IdString() && ctx->cells.count(ep.first.cell);
-                if (endpoint_cell_exists)
-                    ep_cell = ctx->cells.at(ep.first.cell).get();
-                bool endpoint_is_multicycle = ep_cell && ep_cell->attrs.count(mcp_attr);
-                if (endpoint_is_multicycle)
-                    mcp = std::max(1, std::atoi(ep_cell->attrs.at(mcp_attr).as_string().c_str()));
-                bool capture_clock_exists = dom.key.clock != IdString() && ctx->nets.count(dom.key.clock);
-                bool relax_by_extra_periods = mcp > 1 && capture_clock_exists;
-                if (relax_by_extra_periods) {
-                    NetInfo *clk_net = ctx->nets.at(dom.key.clock).get();
-                    if (clk_net->clkconstr)
-                        init_required.min_delay -= clk_net->clkconstr->period.minDelay() * (mcp - 1);
-                }
-            }
+            // set_multicycle_path -setup N: N-1 more periods to reach the capture edge.
+            // Hold is not moved (Vivado's -setup N -hold N-1).
+            int mcp = setup_multicycle(ctx, ep.first.cell, dom.key.clock);
+            if (mcp > 1)
+                init_required.min_delay += ctx->nets.at(dom.key.clock)->clkconstr->period.minDelay() * (mcp - 1);
             set_required_time(ep.first, dom_id, init_required, 1, clock_key);
         }
     }
