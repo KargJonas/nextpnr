@@ -204,9 +204,10 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
 - **`set_multicycle_path`** supports setup multicycle tagging with `-to [get_cells ...]`
   NAME-glob selectors; `-hold` is parsed but does not set setup tags, and `-from` is
   rejected as unsupported (`xdc.cc`). `-setup N` moves the capture edge N−1 periods
-  later; hold stays at the original edge (as Vivado `-setup N -hold N-1`). Only cells
-  that keep their name through packing (e.g. `FDRE`) carry the tag; LUT-RAM macros such
-  as `RAM32M` lose it.
+  later; hold stays at the original edge (as Vivado `-setup N -hold N-1`). The Fmax of
+  a tagged path is N / datapath delay (N − ½ between opposite edges). Only cells that
+  keep their name through packing (e.g. `FDRE`) carry the tag; LUT-RAM macros such as
+  `RAM32M` lose it.
 - **Not supported**: `set_false_path`, `set_max_delay`/`set_min_delay`,
   `create_generated_clock`, `set_input_delay`/`set_output_delay`, path groups,
   `get_pins`/`get_iobanks`/`get_clocks` targets, and any constraint other than the

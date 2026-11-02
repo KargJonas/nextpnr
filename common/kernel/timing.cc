@@ -708,6 +708,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
             auto &ep_port = ports.at(ep.first);
 
             auto &req = ep_port.required.at(capture_id);
+            int mcp = setup_multicycle(ctx, ep.first.cell, capture.key.clock);
 
             for (auto &[launch_id, arr] : ep_port.arrival) {
                 const auto &launch = domains.at(launch_id);
@@ -747,6 +748,15 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                             delay -= clock_delay.maxDelay();
                         }
                     }
+                }
+
+                // N-cycle endpoint: take out the N-1 periods added in walk_backward(), then
+                // scale to the one-cycle budget the Fmax is computed from (a period, or half a
+                // period between opposite edges): the budget is 2*(N-1)+h half periods, not h.
+                if (mcp > 1) {
+                    delay_t period = ctx->nets.at(capture.key.clock)->clkconstr->period.minDelay();
+                    int h = domains.at(launch_id).key.edge == capture.key.edge ? 2 : 1;
+                    delay = (delay + period * (mcp - 1)) * h / (h + 2 * (mcp - 1));
                 }
 
                 if (!domain_delay.count(dp) || domain_delay.at(dp) < delay) {
