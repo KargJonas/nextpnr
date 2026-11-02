@@ -1,5 +1,7 @@
 set(SOURCES
+    bram_place.cc
     cells.cc
+    clock_tree.cc
     constids.inc
     delay_matrix.cc
     extra_data.h

@@ -222,6 +222,8 @@ struct XilinxImpl : HimbaechelAPI
     int hclk_for_ioi(int tile) const;
 
     std::string tile_name(int tile) const;
+    // The die whose chipdb is loaded (xc7a35t is "xc7a50t", and so on)
+    std::string chipdb_die;
 
     std::vector<XilinxCellTags> cell_tags;
     const XilinxCellTags *get_tags(const CellInfo *cell) const
@@ -260,6 +262,32 @@ struct XilinxImpl : HimbaechelAPI
     void compute_edge_rates();
     bool load_delay_matrix(const std::string &path);
     void save_delay_matrix(const std::string &path) const;
+
+    // The global clock tree's insertion delay; see clock_tree.cc
+    struct ClockTreeRates
+    {
+        const char *die;
+        delay_t ps_per_region_row, ps_per_10_columns, bram_clock_pin_ps, flat_route_ps;
+    };
+    ClockTreeRates ct_rates{};
+    bool ct_enabled = false;
+    int ct_spine_x = -1;
+    float ct_centre_y = 0;
+    std::vector<int> ct_region_rows; // the centre (HROW) row of each clock region row
+    pool<IdString> ct_bufg_bel_types;
+    void init_clock_tree();
+    bool clock_rates_measured() const;
+    bool is_global_clock_bel(BelId bel) const;
+    delay_t clock_tree_delay_at(int x, int y, bool bram_clock_pin) const;
+    delay_t clock_tree_delay(BelId sink) const;
+    delay_t predict_clock_tree_delay(BelId src_bel, BelId dst_bel) const;
+    bool getArcDelayOverride(const NetInfo *net_info, const PortRef &sink, DelayQuad &delay) const override;
+
+    // Block RAMs placed by read-mux group, then everything else around them;
+    // see bram_place.cc
+    bool is_movable_bram(const CellInfo *ci) const;
+    bool place_brams_by_group();
+    void replace_around_brams();
 
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;

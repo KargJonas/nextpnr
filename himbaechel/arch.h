@@ -675,6 +675,10 @@ struct Arch : BaseArch<ArchRanges>
     {
         return uarch->predictDelay(src_bel, src_pin, dst_bel, dst_pin);
     }
+    bool getArcDelayOverride(const NetInfo *net_info, const PortRef &sink, DelayQuad &delay) const override
+    {
+        return uarch->getArcDelayOverride(net_info, sink, delay);
+    }
     delay_t getDelayEpsilon() const override { return 20; }                 // TODO
     delay_t getRipupDelayPenalty() const override { return ripup_penalty; } // TODO
     float getDelayNS(delay_t v) const override { return v * 0.001; }

@@ -32,6 +32,15 @@ NEXTPNR_NAMESPACE_BEGIN
 
 TimingAnalyser::TimingAnalyser(Context *ctx) : ctx(ctx)
 {
+    // An architecture that models its clock trees asks every analyser -- the
+    // placer's included -- to time with the skew they produce.  Looked up
+    // without interning the name, so an architecture that never sets it
+    // keeps its IdString table as it was.
+    auto known = ctx->idstring_str_to_idx->find("timing/clockSkew");
+    if (known != ctx->idstring_str_to_idx->end()) {
+        auto clock_skew = ctx->settings.find(IdString(known->second));
+        with_clock_skew = clock_skew != ctx->settings.end() && clock_skew->second.as_bool();
+    }
     ClockDomainKey key{IdString(), ClockEdge::RISING_EDGE};
     domain_to_id.emplace(key, 0);
     domains.emplace_back(key);

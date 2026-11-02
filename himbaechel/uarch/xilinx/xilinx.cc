@@ -27,6 +27,7 @@
 #include "util.h"
 
 #include "placer_heap.h"
+#include "timing_opt.h"
 #include "placer_static.h"
 #include "router2.h"
 
@@ -91,6 +92,15 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("holdbufs", po::value<std::string>(),
                            "before placing, re-create the reference build's hold-fix feedthrough buffers listed in "
                            "this file (scripts/routing_dump.py), so -o preplaced / -o prerouted replay them too");
+    specific.add_options()("clock-tree", po::value<std::string>(),
+                           "global clock insertion delay model: on (default; dies with measured clock delays only), "
+                           "off, or force (an uncalibrated die takes the xc7vx485t's); see clock_tree.cc");
+    specific.add_options()("bram-place", po::value<std::string>(),
+                           "place block RAMs by read-mux group and the rest again around them: on (default; dies with "
+                           "measured clock delays only), off, or force (any die); see bram_place.cc");
+    specific.add_options()("timing-opt", po::value<std::string>(),
+                           "after placing, the timing-driven placement optimisation on the critical paths: R[,N] moves a "
+                           "cell up to R tiles, N rounds (default 30); off unless given");
     specific.add_options()("hold-detour-max", po::value<double>(),
                            "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
                            "(default 0.5)");
@@ -145,6 +155,7 @@ void XilinxImpl::init_database(Arch *arch)
     const bool xc7s75_uses_xc7s100 = die == "xc7s75";
     if (xc7s75_uses_xc7s100)
         die = "xc7s100";
+    chipdb_die = die;
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
     // A bare die name carries no package, and set_package("") is not the
@@ -892,6 +903,7 @@ void XilinxImpl::prePlace()
         build_delay_matrix();
     }
     apply_loc_constraints();
+    init_clock_tree();
     assign_cell_tags();
     index_control_sets();
     cell_tags_set = true;
@@ -904,6 +916,25 @@ void XilinxImpl::prePlace()
 
 void XilinxImpl::postPlace()
 {
+    // "-o timing-opt=R[,N]": the timing-driven placement optimisation of common/place/timing_opt.cc (upstream; the iCE40 flow
+    // runs it behind --opt-timing) on the LUTs and flops of the critical paths, moving a cell up to R tiles, N rounds (default
+    // 30), with the measured delay matrix giving its estimates.  Off unless asked for, until it is measured on xc7
+    // (docs/physopt-pass-proposal.md in the tools repository).
+    replace_around_brams();
+    const bool timing_opt_asked = ctx->args.options.count("timing-opt");
+    if (timing_opt_asked) {
+        std::string v = ctx->args.options.at("timing-opt").as<std::string>();
+        TimingOptCfg cfg(ctx);
+        cfg.cellTypes.insert(id_SLICE_LUTX);
+        cfg.cellTypes.insert(id_SLICE_FFX);
+        cfg.radius = std::max(1, std::atoi(v.c_str()));
+        auto comma = v.find(',');
+        const bool has_iterations = comma != std::string::npos;
+        if (has_iterations)
+            cfg.iterations = std::max(1, std::atoi(v.c_str() + comma + 1));
+        log_info("timing-opt: radius %d tiles, %d rounds\n", cfg.radius, cfg.iterations);
+        timing_opt(ctx, cfg);
+    }
     fixup_placement();
     ctx->assignArchInfo();
 }
@@ -1681,6 +1712,10 @@ delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel,
     bool both_bels_known = src_bel != BelId() && dst_bel != BelId();
     if (!both_bels_known)
         return 0;
+    delay_t clock_tree = predict_clock_tree_delay(src_bel, dst_bel);
+    const bool clock_tree_applies = clock_tree >= 0;
+    if (clock_tree_applies)
+        return clock_tree;
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
     tile_xy(ctx->chip_info, dst_bel.tile, dx, dy);

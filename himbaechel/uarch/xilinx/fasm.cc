@@ -1596,6 +1596,29 @@ struct FasmBackend
                     // direction owns the slew choice.
                     if (!is_output)
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                } else if (is_liob18) {
+                    // The left-hand HP receiver, from a reference bitstream (an
+                    // IBUFDS LVDS on the VC707 USER_CLOCK pins, LIOB18_X81Y79):
+                    // the P half alone is set, with the same IN_DIFF bits as the
+                    // right-hand side.  The database's LIOB18 LVDS.IN_DIFF key
+                    // clears one of them (!38_126), so the SSTL key is the one
+                    // that matches; nothing on the N half.
+                    const bool is_p_half = yLoc == 0;
+                    if (is_p_half) {
+                        write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
+                        if (!is_output)
+                            write_bit("IBUF_HP_BANK_GLUE");
+                        std::string saved = fasm_ctx.back();
+                        fasm_ctx.back() = "DIFF";
+                        write_bit("ZIBUF_LOW_PWR");
+                        fasm_ctx.back() = saved;
+                    }
+                    // As on the right-hand side, and as Vivado's bitstream
+                    // decodes (both halves of LIOB18_X81Y79 for an input-only
+                    // IBUFDS).  The feature is all cleared bits in the
+                    // database, so the frames are the same either way.
+                    if (!is_output)
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 } else if (is_tmds33) {
                     // TMDS_33 has a receiver key of its own, defined on the P
                     // half only; the N half carries no IN_DIFF (a reference
@@ -2329,8 +2352,21 @@ struct FasmBackend
         }
 
         int width = this_width;
-        if (width == 0)
+        const bool width_unset = width == 0;
+        if (width_unset) {
+            // A port the design never uses keeps its width field clear, the
+            // _1 encoding.  That is what Vivado writes for an instantiated
+            // RAMB with a port width of 0, decoded from its bitstreams: on
+            // this tree's x1 ROMs, its 9-bit RAMs and its 36-bit buffers, the
+            // unused write port of each is _1, and on RAMs whose ports
+            // differ (written 36 wide on A and read 9 on B, and the reverse)
+            // both unused directions are _1.  Taking another port's width
+            // instead put the wrong port's width on the unused one wherever
+            // the widths differ.  (Vivado's own synthesis gives an unused port
+            // the memory's width as a parameter, which is where an earlier
+            // comparison against it saw all four markers set.)
             return;
+        }
         int actual_width = width;
         if (is_36) {
             if (width == 1)
@@ -2536,9 +2572,15 @@ struct FasmBackend
             // each half at 4 plus the same bit (prjxray's 027-bram36-config).
             // Without it the halves act as two independent memories and a
             // read returns the wrong bits.
+            // A port the design never uses (width 0) leaves its bit clear,
+            // as Vivado does: on an x1 ROM it sets the bit for both reads and
+            // the write it has, not for the unused write port, and on a RAM
+            // written 9 wide and read 36 wide only the 9-wide port's bit.
             bool is_ramb36 = ci != nullptr && ci->type == id_RAMB36E1_RAMB36E1;
             if (is_ramb36) {
-                for (const char *width : {"READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A", "WRITE_WIDTH_B"}) {
+                static const char *kWidths[] = {"READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A",
+                                                "WRITE_WIDTH_B"};
+                for (const char *width : kWidths) {
                     int bits = int_or_default(ci->params, ctx->id(width), 0);
                     bool odd_width = bits == 1 || bits == 9;
                     write_bit(std::string("RAMB36.BRAM36_") + width + "_1", odd_width);
@@ -3014,11 +3056,20 @@ struct FasmBackend
         // A pin tied inside the tile gets its logical value from the tieoff
         // (see below), so its inverter stays off.  That is what Vivado writes:
         // it refuses a tieoff behind an active inverter (DRC PDCN-6).
+        // Written as one vector, every bit stated, as Vivado writes it:
+        //   ZIS_INMODE_INVERTED[4:0] = 5'b11111
+        // Writing only the bits that happen to be set leaves the rest to
+        // whatever the frame already holds, and these are inverted-sense
+        // bits -- an unwritten ZIS_*_INVERTED means the line IS inverted,
+        // which silently changes what the DSP computes.  Stating the whole
+        // vector also makes a FASM comparison against Vivado meaningful.
         auto write_bus_zinv = [&](std::string name, int width) {
+            std::vector<bool> zinv(width);
             for (int i = 0; i < width; i++) {
                 const bool tied_in_tile = tile_tied_pin_names.count(name + std::to_string(i));
-                write_bit(stringf("ZIS_%s_INVERTED[%d]", name.c_str(), i), tied_in_tile || !pin_inverted(name, i));
+                zinv[i] = tied_in_tile || !pin_inverted(name, i);
             }
+            write_vector(stringf("ZIS_%s_INVERTED[%d:0]", name.c_str(), width - 1), zinv);
         };
 
         // value 1 is equivalent to 2, according to UG479

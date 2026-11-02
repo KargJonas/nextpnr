@@ -560,6 +560,32 @@ jobs:
             timeout: 600
             pnr_flags: --placer-heap-timingweight 100
 
+          # The design that showed nextpnr's timing report could not be
+          # trusted for deep memories: a 2.5 MB ROM of 640 RAMB36s holding
+          # Linux.  Before the clock-tree model and the block RAM placement it
+          # met 100 MHz by the report and read its ROM wrongly on the board;
+          # with them it boots.  The only entry gated on placement quality:
+          # bram_fom.py's score of its block RAMs, from the placement alone,
+          # must stay with the placements that read their ROM on the board.
+          # Stretch, like every netlist entry, so a failing score turns this
+          # job red on the PR without blocking it: hours of P&R on a hosted
+          # runner cannot be a required check, and the red is the signal.
+          # Its netlist is Verilator's, not yosys's, and its flags are the
+          # board build's.  See its README.
+          - name: vc707-litex-romlinux
+            tier: stretch
+            source: netlist
+            design: vc707-litex-romlinux
+            netlist: xilinx_vc707.json.gz
+            xdc: xilinx_vc707.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 300
+            pnr_flags: --placer-heap-timingweight 100 --placer-heap-congestion-spread -o delay-matrix=$EX/delay-matrix-xc7vx485t.txt
+            fom_max_worst: 6100
+            fom_max_p95: 5400
+
           # The lowRISC Sonata's Linux SoC: dual-core VexRiscv-SMP with a
           # shared FPU, 64 KiB I-caches and HyperRAM, on an xc7a50t.  It is
           # the one entry that needs --placer-heap-congestion-spread.  HeAP
@@ -905,8 +931,43 @@ jobs:
             -o xdc="$EX/${{ matrix.xdc }}" \
             --json "${{ matrix.name }}.json" \
             -o fasm="${{ matrix.name }}.fasm" \
+            -o placement="${{ matrix.name }}_placement.json" \
             --router router2 --timing-allow-fail -o hold-fix $ENTRY_PNR_FLAGS 2>&1 | tee pnr.log
           grep -E "Max frequency|Device utilisation" -A12 pnr.log | tail -25 || true
+
+      # Placement quality, for an entry whose failure on the board was its
+      # block RAM placement rather than anything nextpnr reports.  The score
+      # (bram_fom.py) is each block RAM's worst estimated read path to the
+      # registers it feeds.  The worst score is the test: every placement that
+      # read its ROM on the board scored 5995 ps or less, the two that did not
+      # 6251 and 6961, and the limit sits between; the p95 limit is a backstop.  It also insists that the
+      # clock-tree model and the block RAM pass ran, since a run without them
+      # is the configuration that failed.
+      - name: Block RAM placement figure of merit
+        if: matrix.fom_max_worst
+        env:
+          EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
+        run: |
+          set -o pipefail
+          # The lines each pass logs when it ran, not the prefixes: a model
+          # without rates for the die logs "clock-tree: no clock delays
+          # measured for ...", and the pass it gates "bram-place: no clock
+          # delays measured ...", and neither of those is the configuration
+          # the budget was measured under.
+          for want in "clock-tree: ${{ matrix.die }}, [0-9]+ clock region rows" \
+                      "bram-place: [0-9]+ block RAMs in [0-9]+ read-mux groups"; do
+            if ! grep -Eq "$want" pnr.log; then
+              echo "::error::no '$want' line in the P&R log: the clock-tree model or the block RAM pass did not run"
+              exit 1
+            fi
+          done
+          grep -E "clock-tree: |bram-place: " pnr.log
+          python nextpnr/.github/scripts/bram_fom.py \
+            --netlist "${{ matrix.name }}.json" \
+            --tilegrid "prjxray-db/${{ matrix.family }}/${{ matrix.die }}/tilegrid.json" \
+            --delay-matrix "$EX/delay-matrix-xc7vx485t.txt" \
+            --max-worst ${{ matrix.fom_max_worst }} --max-p95 ${{ matrix.fom_max_p95 }} \
+            "${{ matrix.name }}=${{ matrix.name }}_placement.json"
 
       # ---------------- common: assemble ----------------
 

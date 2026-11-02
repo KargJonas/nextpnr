@@ -235,9 +235,18 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   WTDP/WSDP × RTDP/RSDP timing by rewriting `timing_index` (`xilinx.cc:602-612`).
 - **Timing-driven placement**: the *static* placer is configured with timing weights
   (`timing_c/mx/my`, `xilinx.cc:361-363`); the *heap* placer is **not** given explicit timing
-  weights (only HPWL scales and control-set grouping). There is **no `timing_opt.cc`
-  post-placement timing optimisation** invoked by himbaechel, and no arch-level `--report`
-  timing gate in the uarch itself (generic `CommandHandler`/`timing.h` reporting applies).
+  weights (only HPWL scales and control-set grouping). The upstream `timing_opt.cc`
+  post-placement optimisation runs when `-o timing-opt=R[,N]` is given (radius and rounds,
+  `xilinx.cc`), and there is no arch-level `--report` timing gate in the uarch itself
+  (generic `CommandHandler`/`timing.h` reporting applies).
+- **Clock tree model** (`clock_tree.cc`): the global clock tree's insertion delay per clock
+  region row and column, calibrated per die (the xc7vx485t today; `-o clock-tree=on|off|force`),
+  fed to timing analysis through `getArcDelayOverride` on every BUFGCTRL-driven sink and
+  switched on as `timing/clockSkew`. Dies without measured rates keep their routed delay.
+- **Block RAM placement** (`bram_place.cc`): after the heap placer, block RAMs sharing read-mux
+  logic are grouped and re-placed around their consumers with the delay matrix and the clock
+  tree as the cost, then the lifted logic is placed again; `-o bram-place=on|off|force`, on by
+  default only on dies with a calibrated clock tree.
 - **Derived constraints**: `generate_constraints` (`pack_clocking.cc:384-535`) propagates
   `create_clock` periods through BUFGCTRL/IBUF/PLL/MMCM, computing VCO and output-clock
   frequencies for downstream timing analysis.

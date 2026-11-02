@@ -30,6 +30,9 @@ struct TimingOptCfg
     // Normally these would only be logic cells (or tiles if applicable), the algorithm makes little sense
     // for other cell types
     pool<IdString> cellTypes;
+    // how far (tiles) from its present bel a cell may be moved, and how many rounds over the critical paths
+    int radius = 2;
+    int iterations = 30;
 };
 
 extern bool timing_opt(Context *ctx, TimingOptCfg cfg);

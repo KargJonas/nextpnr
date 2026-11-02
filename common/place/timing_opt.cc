@@ -48,13 +48,19 @@ class TimingOptimiser
         if (ctx->verbose)
             timing_analysis(ctx, false, true, false, false);
         tmg.setup();
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < cfg.iterations; i++) {
             log_info("   Iteration %d...\n", i);
             tmg.run();
             setup_delay_limits();
             auto crit_paths = find_crit_paths(0.98, 50000);
+            st_paths = st_skipped = st_solved = st_nosol = st_cells = st_movable = 0;
+            st_gain = 0;
             for (auto &path : crit_paths)
                 optimise_path(path);
+            if (ctx->verbose)
+                log_info("      %d critical paths: %d skipped (fewer than two movable cells), %d moved (%.2f ns of "
+                         "estimated path delay saved), %d without a better placement; %d of %d cells on them movable\n",
+                         st_paths, st_skipped, st_solved, ctx->getDelayNS(st_gain), st_nosol, st_movable, st_cells);
             if (ctx->verbose)
                 timing_analysis(ctx, false, true, false, false);
         }
@@ -63,6 +69,8 @@ class TimingOptimiser
     }
 
   private:
+    int st_paths = 0, st_skipped = 0, st_solved = 0, st_nosol = 0, st_cells = 0, st_movable = 0;
+    delay_t st_gain = 0;
     void setup_delay_limits()
     {
         max_net_delay.clear();
@@ -356,6 +364,7 @@ class TimingOptimiser
         path_cells.clear();
         cell_neighbour_bels.clear();
         bel_candidate_cells.clear();
+        st_paths++;
         if (ctx->debug)
             log_info("Optimising the following path: \n");
 
@@ -377,15 +386,18 @@ class TimingOptimiser
             }
             if (std::find(path_cells.begin(), path_cells.end(), port->cell->name) != path_cells.end())
                 continue;
+            st_cells++;
             if (port->cell->belStrength > STRENGTH_WEAK || !cfg.cellTypes.count(port->cell->type) ||
                 port->cell->cluster != ClusterId())
                 continue;
             if (ctx->debug)
                 log_info("        can move\n");
+            st_movable++;
             path_cells.push_back(port->cell->name);
         }
 
         if (path_cells.size() < 2) {
+            st_skipped++;
             if (ctx->debug) {
                 log_info("Too few moveable cells; skipping path\n");
                 log_break();
@@ -405,7 +417,7 @@ class TimingOptimiser
         }
 
         IdString last_cell;
-        const int d = 2; // FIXME: how to best determine d
+        const int d = cfg.radius;
         for (auto cell : path_cells) {
             // FIXME: when should we allow swapping due to a lack of candidates
             find_neighbours(ctx->cells[cell].get(), last_cell, d, false);
@@ -527,6 +539,9 @@ class TimingOptimiser
                 cursor = backtrace.at(cursor);
                 route_to_solution.push_back(cursor);
             }
+            st_solved++;
+            if (lowest->second < original_delay)
+                st_gain += original_delay - lowest->second;
             if (ctx->debug)
                 log_info("Found a solution with cost %.02f ns (existing path %.02f ns)\n",
                          ctx->getDelayNS(lowest->second), ctx->getDelayNS(original_delay));
@@ -538,6 +553,7 @@ class TimingOptimiser
             }
 
         } else {
+            st_nosol++;
             if (ctx->debug)
                 log_info("Solution was not found\n");
         }
