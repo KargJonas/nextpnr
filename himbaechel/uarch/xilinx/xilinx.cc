@@ -1590,6 +1590,64 @@ const char *bram_write_mode_code(const CellInfo *ci, IdString param)
 }
 } // namespace
 
+bool XilinxImpl::cell_param_is_one(const CellInfo *cell, const char *name) const
+{
+    for (const auto &param : cell->params) {
+        const bool same_name = param.first.str(ctx) == name;
+        if (same_name)
+            return int_or_default(cell->params, param.first, 0) == 1;
+    }
+    return false;
+}
+
+bool XilinxImpl::bram_clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const
+{
+    const std::string clock_name = clock_port.str(ctx);
+    const bool port_a = clock_name.compare(0, 9, "CLKARDCLK") == 0;
+    if (port_a)
+        return cell_param_is_one(cell, "IS_CLKARDCLK_INVERTED");
+    const bool port_b = clock_name.compare(0, 9, "CLKBWRCLK") == 0;
+    if (port_b)
+        return cell_param_is_one(cell, "IS_CLKBWRCLK_INVERTED");
+    return false;
+}
+
+bool XilinxImpl::clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const
+{
+    const bool is_ff = cell->type == id_SLICE_FFX;
+    if (is_ff) {
+        const bool clock_is_ck = clock_port == id_CK;
+        if (clock_is_ck)
+            return int_or_default(cell->params, id_IS_C_INVERTED, 0) == 1;
+        return false;
+    }
+    const bool is_lut = cell->type == id_SLICE_LUTX;
+    if (is_lut) {
+        const bool clock_is_clk = clock_port == id_CLK;
+        if (clock_is_clk)
+            return int_or_default(cell->params, id_IS_WCLK_INVERTED, 0) == 1;
+        return false;
+    }
+    const bool is_bram = cell->type == id_RAMB18E1_RAMB18E1 || cell->type == id_RAMB36E1_RAMB36E1;
+    if (is_bram)
+        return bram_clock_on_falling_edge(cell, clock_port);
+    return false;
+}
+
+TimingClockingInfo XilinxImpl::getPortClockingInfo(const CellInfo *cell, IdString port, int index) const
+{
+    TimingClockingInfo info = ctx->get_port_clocking_info_default(cell, port, index);
+    const bool falling = clock_on_falling_edge(cell, info.clock_port);
+    if (falling) {
+        // Only the rising arcs stored in the chipdb are flipped. An arc that
+        // the chipdb already marks falling is left alone.
+        const bool chipdb_says_rising = info.edge == RISING_EDGE;
+        if (chipdb_says_rising)
+            info.edge = FALLING_EDGE;
+    }
+    return info;
+}
+
 void XilinxImpl::assign_cell_tags()
 {
     cell_tags.resize(ctx->cells.size());

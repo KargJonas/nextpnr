@@ -141,6 +141,15 @@ struct XilinxImpl : HimbaechelAPI
     IdString getBelBucketForCellType(IdString cell_type) const override;
     IdString getBelBucketForBel(BelId bel) const override;
 
+    // The chipdb records every sequential arc on the rising edge. The cell
+    // still carries the clock inversion as a parameter (the bitstream writer
+    // already programs that bit). Report the falling edge for that clock port
+    // so a path between opposite edges gets half a period.
+    TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const override;
+    bool clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const;
+    bool bram_clock_on_falling_edge(const CellInfo *cell, IdString clock_port) const;
+    bool cell_param_is_one(const CellInfo *cell, const char *name) const;
+
     // Bels
     void notifyBelChange(BelId bel, CellInfo *cell) override;
     void update_logic_bel(BelId bel, CellInfo *cell);
