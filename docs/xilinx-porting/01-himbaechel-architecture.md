@@ -201,13 +201,16 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
 - **`create_clock`** with `-period` (ns) on `[get_ports]`/`[get_nets]`
   (`xdc.cc:208-254`): sets `NetInfo::clkconstr` (period + 50% duty). `-name`, `-waveform`,
   `-add` are warned-and-ignored.
-- **`set_multicycle_path`** supports setup multicycle tagging with `-to [get_cells ...]`
-  NAME-glob selectors; `-hold` is parsed but does not set setup tags, and `-from` is
-  rejected as unsupported (`xdc.cc`). `-setup N` moves the capture edge N−1 periods
-  later; hold stays at the original edge (as Vivado `-setup N -hold N-1`). The Fmax of
-  a tagged path is N / datapath delay (N − ½ between opposite edges). Only cells that
-  keep their name through packing (e.g. `FDRE`) carry the tag; LUT-RAM macros such as
-  `RAM32M` lose it.
+- **`set_multicycle_path -setup N [-end] -to <sel>`** (`xdc.cc`): `-end` is taken (the
+  default). `<sel>` is a list of cell names, or `get_cells` with names, `*`/`?` globs or
+  `-filter {NAME =~ <glob>}` (or `NAME == <name>`, an exact name: `*` there is no
+  wildcard, as in Vivado). A line with `get_pins`/`get_nets` (the tag relaxes every input
+  of a cell; Vivado does not apply a net), `-start`, `-from`, `-through`, another filter
+  or an N that does not fit an `int` is skipped with a warning; a selector that matches
+  nothing warns. The capture edge moves N−1 periods later; hold stays at the original edge (as
+  Vivado `-setup N -hold N-1`), and `-hold` has no effect. The Fmax of a tagged path is
+  N / datapath delay (N − ½ between opposite edges). Only cells that keep their name
+  through packing (e.g. `FDRE`) carry the tag; LUT-RAM macros such as `RAM32M` lose it.
 - **Not supported**: `set_false_path`, `set_max_delay`/`set_min_delay`,
   `create_generated_clock`, `set_input_delay`/`set_output_delay`, path groups,
   `get_pins`/`get_iobanks`/`get_clocks` targets, and any constraint other than the
