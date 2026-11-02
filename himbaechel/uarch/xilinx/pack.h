@@ -140,10 +140,12 @@ struct XilinxPacker
 
     // DistRAM
     dict<IdString, XFormRule> dram_rules, dram32_6_rules, dram32_5_rules;
+    // macro: the LUT-RAM cell this one implements
     CellInfo *create_dram_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                              std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, int z);
+                              std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, int z, const CellInfo *macro);
     CellInfo *create_dram32_lut(const std::string &name, CellInfo *base, const DRAMControlSet &ctrlset,
-                                std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, bool o5, int z);
+                                std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, bool o5, int z,
+                                const CellInfo *macro);
     void pack_dram();
 
     // Constant pins
