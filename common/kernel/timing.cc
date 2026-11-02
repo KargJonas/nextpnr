@@ -701,12 +701,12 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
             auto &req = ep_port.required.at(capture_id);
 
             for (auto &[launch_id, arr] : ep_port.arrival) {
-                const auto &launch = domains.at(capture_id);
+                const auto &launch = domains.at(launch_id);
 
                 auto dp = domain_pair_id(launch_id, capture_id);
 
                 auto clocks = std::make_pair(launch.key.clock, capture.key.clock);
-                auto same_clock = capture_id == launch_id;
+                auto same_clock = launch.key.clock == capture.key.clock;
                 auto related_clocks = clock_delays.count(clocks) > 0;
                 delay_t clock_to_clock = 0;
                 if (related_clocks) {
