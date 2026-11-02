@@ -1409,6 +1409,9 @@ void XC7Packer::constrain_bram_cascades()
 
 void XilinxPacker::pack_inverters()
 {
+    // An inverter folded into every clock port it drove has no loads left: it is removed, not placed with the
+    // clock routed into it
+    std::vector<IdString> dead_invs;
     // Rewrite inverted clocks
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
@@ -1423,6 +1426,9 @@ void XilinxPacker::pack_inverters()
             ci->disconnectPort(port.first);
             ci->connectPort(port.first, inv->getPort(id_I));
             ci->params[ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx))] = Property(already_inverted ? 0 : 1);
+            const bool inverter_has_no_loads_left = net->users.empty();
+            if (inverter_has_no_loads_left)
+                dead_invs.push_back(inv->name);
         }
     }
     // Fold an inverter driving a PLL/MMCM control pin into that pin's
@@ -1442,7 +1448,6 @@ void XilinxPacker::pack_inverters()
     // generic invertible_pins list includes bussed pins like OPMODE[0], whose
     // parameter is a vector rather than IS_<pin>_INVERTED, and folding those
     // needs bit-level handling this does not attempt.
-    std::vector<IdString> dead_invs;
     int folded = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
