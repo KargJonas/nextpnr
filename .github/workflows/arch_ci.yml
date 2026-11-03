@@ -103,3 +103,40 @@ jobs:
         build_nextpnr
         run_tests
         run_archcheck
+
+  # Saves the Eigen 3.4.0 checkout that demos.yml builds nextpnr against.
+  # demos never runs on a push to main (it runs on pull requests and by hand),
+  # a pull request can restore a cache saved on main but not one saved by
+  # another pull request, and gitlab.com turns clones away under load; saved
+  # here on push, a pull request restores it instead of cloning.  The path,
+  # the key and the commit are the ones in demos.yml.
+  Cache-eigen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c
+    steps:
+    - name: Cache the Eigen 3.4.0 checkout
+      uses: actions/cache@v4
+      id: cache-eigen
+      with:
+        path: /tmp/eigen
+        key: cache-eigen-3.4.0-${{ env.EIGEN_COMMIT }}-r1
+
+    - name: Clone Eigen 3.4.0
+      run: |
+        for try in 1 2 3 4; do
+          git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git /tmp/eigen && break
+          if [ "$try" = 4 ]; then exit 1; fi
+          sleep 60
+        done
+      if: steps.cache-eigen.outputs.cache-hit != 'true'
+
+    - name: Check the Eigen commit
+      run: |
+        head=$(git -C /tmp/eigen rev-parse HEAD)
+        echo "Eigen checkout: $head"
+        if [ "$head" != "$EIGEN_COMMIT" ]; then
+          echo "::error::Eigen checkout is $head, not 3.4.0 ($EIGEN_COMMIT)"
+          exit 1
+        fi

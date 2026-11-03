@@ -150,6 +150,9 @@ env:
   # (yosys 0.67 synthesis outputs; the gate reuses them, no yosys needed
   # for those entries)
   DEMO_PROJECTS_REV: 2713a8eb5f94abcceb50431405e8733c61a0b270
+  # The commit Eigen's 3.4.0 tag names (see "Install Eigen" below).  The
+  # same value is in arch_ci.yml, which saves the cached checkout.
+  EIGEN_COMMIT: 3147391d946bb4b6c68edd901f2add6ac1f31f8c
 
 jobs:
   demos:
@@ -669,9 +672,43 @@ jobs:
       # If this is ever moved again, move it because a BOARD was flashed, not
       # because a report looked better: the 5.0.1 placement passed every
       # timing check nextpnr makes and its ethernet was dead.
+      #
+      # The checkout comes from the Actions cache when it can, because
+      # gitlab.com turns clones away under load ("GitLab is currently unable
+      # to handle this request due to load") and every job here clones.  This
+      # workflow never runs on a push to main (it runs on pull requests and by
+      # hand), and a pull request can restore a cache saved on main but not one
+      # saved by another pull request, so arch_ci.yml saves the same checkout
+      # under the same key on push.  The tag, the URL and the commit are
+      # unchanged: the commit is checked below, whichever way the checkout
+      # arrived.
+      - name: Cache the Eigen 3.4.0 checkout
+        id: cache-eigen
+        uses: actions/cache@v4
+        with:
+          path: /tmp/eigen
+          key: cache-eigen-3.4.0-${{ env.EIGEN_COMMIT }}-r1
+
+      - name: Clone Eigen 3.4.0
+        if: steps.cache-eigen.outputs.cache-hit != 'true'
+        run: |
+          # Three more tries, a minute apart: the longest wait seen from a
+          # refusal to the next clone that went through was under three
+          # minutes.  A fourth refusal fails the job.
+          for try in 1 2 3 4; do
+            git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git /tmp/eigen && break
+            if [ "$try" = 4 ]; then exit 1; fi
+            sleep 60
+          done
+
       - name: Install Eigen 3.4.0 (the version proved on hardware)
         run: |
-          git clone --depth 1 --branch 3.4.0 https://gitlab.com/libeigen/eigen.git /tmp/eigen
+          head=$(git -C /tmp/eigen rev-parse HEAD)
+          echo "Eigen checkout: $head"
+          if [ "$head" != "$EIGEN_COMMIT" ]; then
+            echo "::error::Eigen checkout is $head, not 3.4.0 ($EIGEN_COMMIT)"
+            exit 1
+          fi
           cmake -S /tmp/eigen -B /tmp/eigen-build \
             -DCMAKE_INSTALL_PREFIX=/tmp/eigen-install \
             -DBUILD_TESTING=OFF -DEIGEN_BUILD_BLAS=OFF -DEIGEN_BUILD_LAPACK=OFF
