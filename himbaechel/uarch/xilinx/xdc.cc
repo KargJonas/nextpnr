@@ -48,12 +48,16 @@ void XilinxImpl::parse_xdc(const std::string &filename)
     auto isempty = [](const std::string &str) {
         return std::all_of(str.begin(), str.end(), [](char c) { return std::isspace(c); });
     };
-    auto strip_quotes = [](const std::string &str) {
+    auto strip_quotes = [&](const std::string &str) {
         if (str.at(0) == '"') {
-            NPNR_ASSERT(str.back() == '"');
+            const bool is_closed = str.size() >= 2 && str.back() == '"';
+            if (!is_closed)
+                log_error("unbalanced quote in '%s' (on line %d)\n", str.c_str(), lineno);
             return str.substr(1, str.size() - 2);
         } else if (str.at(0) == '{') {
-            NPNR_ASSERT(str.back() == '}');
+            const bool is_closed = str.size() >= 2 && str.back() == '}';
+            if (!is_closed)
+                log_error("unbalanced brace in '%s' (on line %d)\n", str.c_str(), lineno);
             return str.substr(1, str.size() - 2);
         } else {
             return str;
@@ -91,6 +95,32 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         return split_args;
     };
 
+    // Tcl words: {...} and "..." group, and brackets stay in a name such as g[3].q
+    auto tcl_words = [](const std::string &str) {
+        std::vector<std::string> words;
+        std::string word;
+        int depth = 0;
+        bool quoted = false;
+        for (char c : str) {
+            if (c == '"' && depth == 0)
+                quoted = !quoted;
+            else if (c == '{' && !quoted)
+                depth++;
+            else if (c == '}' && !quoted)
+                depth--;
+            const bool separates_words = std::isspace(c) && depth == 0 && !quoted;
+            if (!separates_words)
+                word += c;
+            else if (!word.empty()) {
+                words.push_back(word);
+                word.clear();
+            }
+        }
+        if (!word.empty())
+            words.push_back(word);
+        return words;
+    };
+
     // Vivado calls a one-bit vector port "a[0]", but the JSON frontend
     // collapses a width-1, offset-0 vector to the bare name "a", because
     // yosys' JSON carries nothing that tells `wire [0:0] a` apart from
@@ -108,7 +138,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         if (str.empty() || str.front() != '[')
             log_error("failed to parse target (on line %d)\n", lineno);
         str = str.substr(1, str.size() - 2);
-        auto split = split_to_args(str, false);
+        // as in Vivado, {a b} or "a b" is one word that holds one name or a list of names
+        auto split = tcl_words(str);
         if (split.size() < 1)
             log_error("failed to parse target (on line %d)\n", lineno);
         // get_ports names a top-level port, whose pad cell carries the property;
@@ -120,7 +151,7 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             log_error("targets other than 'get_ports' or 'get_cells' are not supported (on line %d)\n", lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
-        std::string target_name;
+        std::string target_word;
         if (split.front() == "get_cells") {
             int cursor = 1;
             while (cursor < int(split.size()) && !split.at(cursor).empty() && split.at(cursor).at(0) == '-') {
@@ -143,28 +174,30 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                 num_errors++;
                 return tgt_cells;
             }
-            target_name = strip_quotes(split.at(cursor));
+            target_word = split.at(cursor);
         } else {
-            target_name = strip_quotes(split.at(1));
+            target_word = split.at(1);
         }
-        IdString cellname = ctx->id(target_name);
-        if (!ctx->cells.count(cellname)) {
-            std::string base = debus_zero(target_name);
-            bool debussed_name_exists = !base.empty() && ctx->cells.count(ctx->id(base));
-            if (debussed_name_exists)
-                cellname = ctx->id(base);
-        }
-        if (ctx->cells.count(cellname))
-            tgt_cells.push_back(ctx->cells.at(cellname).get());
-        else {
-            // A board-level XDC legitimately constrains every pin of the
-            // board while a design uses a subset, so a miss is not an error:
-            // stay silent like other arches do, and itemise only in verbose
-            // mode.  (Port of nextpnr-xilinx 3da43687/555d326c.)
-            missing_targets++;
-            if (ctx->verbose)
-                log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n",
-                         split.front().c_str(), cellname.c_str(ctx), lineno);
+        for (const std::string &target_name : tcl_words(strip_quotes(target_word))) {
+            IdString cellname = ctx->id(target_name);
+            if (!ctx->cells.count(cellname)) {
+                std::string base = debus_zero(target_name);
+                bool debussed_name_exists = !base.empty() && ctx->cells.count(ctx->id(base));
+                if (debussed_name_exists)
+                    cellname = ctx->id(base);
+            }
+            if (ctx->cells.count(cellname))
+                tgt_cells.push_back(ctx->cells.at(cellname).get());
+            else {
+                // A board-level XDC legitimately constrains every pin of the
+                // board while a design uses a subset, so a miss is not an error:
+                // stay silent like other arches do, and itemise only in verbose
+                // mode.  (Port of nextpnr-xilinx 3da43687/555d326c.)
+                missing_targets++;
+                if (ctx->verbose)
+                    log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n", split.front().c_str(),
+                             cellname.c_str(ctx), lineno);
+            }
         }
         return tgt_cells;
     };
@@ -176,39 +209,38 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         if (str.front() != '[' || str.back() != ']')
             log_error("failed to parse target '%s' (on line %d)\n", str.c_str(), lineno);
         str = str.substr(1, str.size() - 2);
-        auto split = split_to_args(str, false);
+        auto split = tcl_words(str);
         if (split.size() < 1)
             log_error("failed to parse target (on line %d)\n", lineno);
         if (split.front() != "get_ports" && split.front() != "get_nets")
             log_error("targets other than 'get_ports' or 'get_nets' are not supported (on line %d)\n", lineno);
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
-        str = strip_quotes(split.at(1));
-        if (str.empty())
-            return tgt_nets;
-        IdString netname = ctx->id(str);
-        NetInfo *maybe_net = ctx->getNetByAlias(netname);
-        if (maybe_net == nullptr) {
-            // Retry with a trailing "[0]" stripped (see debus_zero above).
-            std::string base = debus_zero(str);
-            if (!base.empty())
-                maybe_net = ctx->getNetByAlias(ctx->id(base));
-        }
-        if (maybe_net != nullptr) {
-            tgt_nets.push_back(maybe_net);
-            return tgt_nets;
-        }
-        // Also test the lowercase variant, for better interoperability with synthesis tools
-        boost::algorithm::to_lower(str);
-        netname = ctx->id(str);
-        maybe_net = ctx->getNetByAlias(netname);
-        if (maybe_net != nullptr)
-            tgt_nets.push_back(maybe_net);
-        else {
-            missing_targets++;
-            if (ctx->verbose)
-                log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
-                         split.front().c_str(), netname.c_str(ctx), lineno);
+        for (std::string name : tcl_words(strip_quotes(split.at(1)))) {
+            IdString netname = ctx->id(name);
+            NetInfo *maybe_net = ctx->getNetByAlias(netname);
+            if (maybe_net == nullptr) {
+                // Retry with a trailing "[0]" stripped (see debus_zero above).
+                std::string base = debus_zero(name);
+                if (!base.empty())
+                    maybe_net = ctx->getNetByAlias(ctx->id(base));
+            }
+            if (maybe_net != nullptr) {
+                tgt_nets.push_back(maybe_net);
+                continue;
+            }
+            // Also test the lowercase variant, for better interoperability with synthesis tools
+            boost::algorithm::to_lower(name);
+            netname = ctx->id(name);
+            maybe_net = ctx->getNetByAlias(netname);
+            if (maybe_net != nullptr)
+                tgt_nets.push_back(maybe_net);
+            else {
+                missing_targets++;
+                if (ctx->verbose)
+                    log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
+                             split.front().c_str(), netname.c_str(ctx), lineno);
+            }
         }
         return tgt_nets;
     };
@@ -221,6 +253,11 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             line = line.substr(0, cstart);
         if (isempty(line))
             continue;
+        // a ';' ends a Tcl command; the Digilent master XDCs end every line with one
+        const size_t last = line.find_last_not_of(" \t\r");
+        const bool ends_with_semicolon = line.at(last) == ';';
+        if (ends_with_semicolon)
+            line = line.substr(0, last);
 
         std::vector<std::string> arguments = split_to_args(line, true);
         if (arguments.empty())
@@ -291,8 +328,16 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                     log_warning("ignoring unsupported XDC option '%s' (on line %d)\n", opt.c_str(), lineno);
                     cursor++;
                 } else if (opt == "-period") {
+                    const bool has_value = cursor + 1 < int(arguments.size());
+                    if (!has_value)
+                        log_error("create_clock -period without a value (on line %d)\n", lineno);
                     cursor++;
-                    period = std::stod(arguments.at(cursor));
+                    try {
+                        period = std::stod(arguments.at(cursor));
+                    } catch (const std::logic_error &) {
+                        log_error("create_clock -period '%s' is not a number (on line %d)\n",
+                                  arguments.at(cursor).c_str(), lineno);
+                    }
                     got_period = true;
                 } else
                     break;
@@ -379,31 +424,6 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                     if (!is_constant_driver && glob_match(cell.first.str(ctx), pattern))
                         cells.push_back(cell.second.get());
                 }
-            };
-            // Tcl words: {...} and "..." group, and brackets stay in a name such as g[3].q
-            auto tcl_words = [](const std::string &str) {
-                std::vector<std::string> words;
-                std::string word;
-                int depth = 0;
-                bool quoted = false;
-                for (char c : str) {
-                    if (c == '"' && depth == 0)
-                        quoted = !quoted;
-                    else if (c == '{' && !quoted)
-                        depth++;
-                    else if (c == '}' && !quoted)
-                        depth--;
-                    const bool separates_words = std::isspace(c) && depth == 0 && !quoted;
-                    if (!separates_words)
-                        word += c;
-                    else if (!word.empty()) {
-                        words.push_back(word);
-                        word.clear();
-                    }
-                }
-                if (!word.empty())
-                    words.push_back(word);
-                return words;
             };
             // The cells of a -to selector; false, with a warning, for a form this reader does not take
             auto select_cells = [&](const std::string &sel, std::vector<CellInfo *> &cells) {
