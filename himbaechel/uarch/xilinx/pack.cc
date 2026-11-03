@@ -685,6 +685,33 @@ void XilinxPacker::pack_srls()
     srl_rules[id_SRLC32E].port_xform[id_Q31] = id_MC31;
     srl_rules[id_SRLC32E].param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
     srl_rules[id_SRLC32E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
+    // SRLC16E is the 16-deep cascade primitive. It is not a constid: interning
+    // the name on a design that has none would shift every later id. The
+    // netlist has already interned it when a cell of that type is present.
+    // Same mapping as SRL16E (D on DI2, Q on O6, A6 and A1 tied high, so the
+    // shift register sits in the upper half of the LUT) plus Q15 on MC31,
+    // which is the A6LUT output that leaves the slice through DOUTMUX.
+    bool seen_srlc16e = false;
+    IdString srlc16e_type;
+    for (auto &cell : ctx->cells) {
+        const bool is_srlc16e = cell.second->type.str(ctx) == "SRLC16E";
+        if (is_srlc16e) {
+            seen_srlc16e = true;
+            srlc16e_type = cell.second->type;
+        }
+    }
+    const bool any_srlc16e = seen_srlc16e;
+    if (any_srlc16e) {
+        XFormRule &rule = srl_rules[srlc16e_type];
+        rule.new_type = id_SLICE_LUTX;
+        rule.port_xform[id_CLK] = id_CLK;
+        rule.port_xform[id_CE] = id_WE;
+        rule.port_xform[id_D] = id_DI2;
+        rule.port_xform[id_Q] = id_O6;
+        rule.port_xform[ctx->id("Q15")] = id_MC31;
+        rule.param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
+        rule.set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
+    }
     generic_xform(srl_rules, true);
     // Fixup SRL inputs
     for (auto &cell : ctx->cells) {
@@ -692,7 +719,8 @@ void XilinxPacker::pack_srls()
         if (ci->type != id_SLICE_LUTX)
             continue;
         std::string orig_type = str_or_default(ci->attrs, id_X_ORIG_TYPE);
-        if (orig_type == "SRL16E") {
+        const bool is_srl16 = orig_type == "SRL16E" || orig_type == "SRLC16E";
+        if (is_srl16) {
             for (int i = 3; i >= 0; i--) {
                 ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
             }
@@ -701,7 +729,9 @@ void XilinxPacker::pack_srls()
                 ci->ports[tp].type = PORT_IN;
                 ci->connectPort(tp, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
-        } else if (orig_type == "SRLC32E") {
+        }
+        const bool is_srl32 = orig_type == "SRLC32E";
+        if (is_srl32) {
             for (int i = 4; i >= 0; i--) {
                 ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
             }
@@ -709,6 +739,27 @@ void XilinxPacker::pack_srls()
                 ci->ports[tp].name = tp;
                 ci->ports[tp].type = PORT_IN;
                 ci->connectPort(tp, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
+            }
+        }
+    }
+    // Q15 leaves only from an A6LUT: that LUT's MC31 is the DOUTMUX input
+    // that drives the DMUX site port. A Q15 with no users stays a plain
+    // SRL16 and can sit in any SLICEM letter.
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_packed_srlc16e =
+                ci->type == id_SLICE_LUTX && str_or_default(ci->attrs, id_X_ORIG_TYPE) == "SRLC16E";
+        if (is_packed_srlc16e) {
+            NetInfo *q15 = ci->getPort(id_MC31);
+            const bool q15_used = q15 != nullptr && !q15->users.empty();
+            if (q15_used) {
+                const bool already_locked = ci->cluster != ClusterId() || ci->constr_abs_z;
+                const bool free_to_lock = !already_locked;
+                if (free_to_lock) {
+                    ci->cluster = ci->name;
+                    ci->constr_abs_z = true;
+                    ci->constr_z = (0 << 4) | BEL_6LUT;
+                }
             }
         }
     }
