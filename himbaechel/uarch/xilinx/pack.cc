@@ -90,8 +90,10 @@ void XilinxPacker::xform_cell(const dict<IdString, XFormRule> &rules, CellInfo *
     for (auto &param : ci->params)
         if (rule.param_xform.count(param.first))
             xform_params.push_back(param.first);
-    for (auto param : xform_params)
-        ci->params[rule.param_xform.at(param)] = ci->params[param];
+    for (auto param : xform_params) {
+        auto param_value = ci->params[param];
+        ci->params[rule.param_xform.at(param)] = param_value;
+    }
 
     for (auto &attr : rule.set_attrs)
         ci->attrs[attr.first] = attr.second;
@@ -401,7 +403,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     auto process_cell = [&](const CellInfo *cell) {
         if (cell->constr_x != lut->constr_x || cell->constr_y != lut->constr_y)
             return;
-        if (cell->type == id_SLICE_LUTX && cell->getPort(id_CLK)) {
+        if (cell->type == id_SLICE_LUTX && (bool_or_default(cell->attrs, id_X_LUT_AS_SRL) || bool_or_default(cell->attrs, id_X_LUT_AS_DRAM))) {
             found_wclk = true;
             clk = cell->getPort(id_CLK);
             wclk_inv = bool_or_default(cell->params, id_IS_WCLK_INVERTED, false);
@@ -1407,6 +1409,60 @@ void XC7Packer::constrain_bram_cascades()
 
 void XilinxPacker::pack_inverters()
 {
+    // An inverter folded into every clock port it drove has no loads left: it is removed, not placed with the
+    // clock routed into it
+    std::vector<IdString> dead_invs;
+    // Inverters folded into a clock port, once each, in the order of their first fold
+    std::vector<CellInfo *> folded_invs;
+    pool<IdString> seen_invs;
+    // Rewrite inverted clocks
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        for (auto &port : ci->ports) {
+            if (!port.first.in(id_WCLK, id_CLKARDCLK, id_CLKBWRCLK))
+                continue;
+            NetInfo *net = port.second.net;
+            if (!net || !net->driver.cell || net->driver.cell->type != id_INV)
+                continue;
+            CellInfo *inv = net->driver.cell;
+            bool already_inverted = bool_or_default(ci->params, ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx)), false);
+            ci->disconnectPort(port.first);
+            ci->connectPort(port.first, inv->getPort(id_I));
+            ci->params[ctx->idf("IS_%s_INVERTED", port.first.c_str(ctx))] = Property(already_inverted ? 0 : 1);
+            const bool first_fold_of_this_inverter = seen_invs.insert(inv->name).second;
+            if (first_fold_of_this_inverter)
+                folded_invs.push_back(inv);
+            const bool inverter_has_no_loads_left = net->users.empty();
+            if (inverter_has_no_loads_left)
+                dead_invs.push_back(inv->name);
+        }
+    }
+    // The folded cells now use the source net. A clock constraint that named
+    // only the inverted net would stay behind, and they would be timed at the
+    // default period. Give it to the source net and exchange the high and low
+    // intervals: the source is the other edge of the same waveform. An
+    // inverted net that still has loads keeps its own constraint, so the
+    // source gets a copy. If the source already has one, leave both.
+    for (CellInfo *inv : folded_invs) {
+        NetInfo *net = inv->getPort(id_O);
+        NetInfo *src = inv->getPort(id_I);
+        const bool source_takes_the_constraint =
+                src != nullptr && src != net && net->clkconstr != nullptr && src->clkconstr == nullptr;
+        if (source_takes_the_constraint) {
+            const bool inverted_net_keeps_loads = !net->users.empty();
+            if (inverted_net_keeps_loads)
+                src->clkconstr = std::make_unique<ClockConstraint>(*net->clkconstr);
+            else
+                src->clkconstr = std::move(net->clkconstr);
+            std::swap(src->clkconstr->high, src->clkconstr->low);
+            continue;
+        }
+        const bool both_clocks_already_constrained =
+                src != nullptr && net->clkconstr != nullptr && src->clkconstr != nullptr;
+        if (both_clocks_already_constrained)
+            log_info("    clock constraint on net '%s' kept; net '%s' already has one\n", ctx->nameOf(net),
+                     ctx->nameOf(src));
+    }
     // Fold an inverter driving a PLL/MMCM control pin into that pin's
     // IS_<pin>_INVERTED parameter, which is what Vivado does.
     //
@@ -1424,7 +1480,6 @@ void XilinxPacker::pack_inverters()
     // generic invertible_pins list includes bussed pins like OPMODE[0], whose
     // parameter is a vector rather than IS_<pin>_INVERTED, and folding those
     // needs bit-level handling this does not attempt.
-    std::vector<IdString> dead_invs;
     int folded = 0;
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
