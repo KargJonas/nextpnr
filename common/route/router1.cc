@@ -306,6 +306,7 @@ struct Router1
     void check()
     {
         pool<arc_key> valid_arcs;
+        std::vector<std::pair<IdString, int>> stub_nets;
 
         for (auto &net_it : ctx->nets) {
             NetInfo *net_info = net_it.second.get();
@@ -349,10 +350,27 @@ struct Router1
                 }
             }
 
+            // A wire bound to the net that no sink's path uses is a stub left
+            // behind by an earlier rip-up; name it rather than abort blind.
+            int stubs = 0;
             for (auto &it : net_info->wires) {
                 WireId w = it.first;
-                log_assert(valid_wires_for_net.count(w));
+                if (valid_wires_for_net.count(w))
+                    continue;
+                if (stubs < 8)
+                    log_warning("net '%s' is bound to wire %s (pip %s) that no sink path uses\n",
+                                ctx->nameOf(net_info), ctx->nameOfWire(w),
+                                it.second.pip == PipId() ? "-" : ctx->nameOfPip(it.second.pip));
+                ++stubs;
             }
+            if (stubs > 0)
+                stub_nets.emplace_back(net_info->name, stubs);
+        }
+        if (!stub_nets.empty()) {
+            for (auto &sn : stub_nets)
+                log_nonfatal_error("net '%s' has %d stub wire(s) not on any sink path\n", ctx->nameOf(sn.first),
+                                   sn.second);
+            log_error("%d net(s) carry stub wires; routing is not clean\n", int(stub_nets.size()));
         }
 
         for (auto &it : wire_to_arcs) {
