@@ -711,6 +711,13 @@ struct FasmBackend
                 // Ignore modes with no associated bit (X-ray omission??)
                 if (belname == "WEMUX" && pinname == "WE")
                     continue;
+                // The all-zero state of DOUTMUX is the MC31 leg. A bitstream
+                // that drives DMUX from an A6LUT MC31 carries no DOUTMUX
+                // feature, and the database row for that leg also sets the
+                // bit shared with A5FFMUX.IN_B.
+                const bool doutmux_mc31_is_the_default = belname == "DOUTMUX" && pinname == "MC31";
+                if (doutmux_mc31_is_the_default)
+                    continue;
 
                 if (belname.substr(1) == "DI1MUX") {
                     // prjxray names the non-default leg of these muxes after
