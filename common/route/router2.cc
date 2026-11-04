@@ -567,6 +567,41 @@ struct Router2
                (net->constant_value != IdString() && ctx->getWireConstantValue(cursor) == net->constant_value);
     }
 
+    // True when the arch binding of this arc runs from the sink back to the
+    // source and some wire on it is bound at STRENGTH_LOCKED or above. Such
+    // bindings are made before the router runs (hold-fix detours on xilinx,
+    // route_mult on GateMate) and bind_and_check_all leaves them bound.
+    // Ripping such an arc leaves its locked pips bound in the arch while the
+    // sink is searched again, so the search either cannot reach the sink or
+    // tries to bind a second pip into a locked wire.
+    bool arc_is_locked_to_source(NetInfo *net, store_index<PortRef> usr, size_t phys_pin)
+    {
+        auto &nd = nets.at(net->udata);
+        WireId src = nd.src_wire;
+        WireId cursor = nd.arcs.at(usr.idx()).at(phys_pin).sink_wire;
+        bool saw_lock = false;
+        // A walk back to the source visits each bound wire at most once, so
+        // more steps than bound wires means the binding is not a tree.
+        const size_t max_steps = net->wires.size();
+        for (size_t step = 0; step < max_steps && cursor != WireId(); ++step) {
+            auto it = net->wires.find(cursor);
+            const bool wire_missing = it == net->wires.end();
+            if (wire_missing)
+                return false;
+            const bool wire_is_locked = it->second.strength >= STRENGTH_LOCKED;
+            if (wire_is_locked)
+                saw_lock = true;
+            const bool reached_source = cursor == src;
+            if (reached_source)
+                return saw_lock;
+            const bool no_driving_pip = it->second.pip == PipId();
+            if (no_driving_pip)
+                return false;
+            cursor = ctx->getPipSrcWire(it->second.pip);
+        }
+        return false;
+    }
+
     void record_prerouted_net(NetInfo *net, store_index<PortRef> usr, size_t phys_pin)
     {
         auto &nd = nets.at(net->udata);
@@ -1211,9 +1246,13 @@ struct Router2
         for (auto usr : net->users.enumerate()) {
             auto &ad = nd.arcs.at(usr.index.idx());
             for (size_t j = 0; j < ad.size(); j++) {
-                // Ripup failed arcs to start with
+                // Ripup failed arcs to start with, but keep a locked binding
+                // that still reaches the source: it cannot be routed again.
                 // Check if arc is already legally routed
-                if (!failed_slack && check_arc_routing(net, usr.index, j)) {
+                const bool locked_to_source = arc_is_locked_to_source(net, usr.index, j);
+                const bool keep_existing_route =
+                        locked_to_source || (!failed_slack && check_arc_routing(net, usr.index, j));
+                if (keep_existing_route) {
                     update_wire_by_loc(t, net, usr.index, j, true);
                     continue;
                 }
