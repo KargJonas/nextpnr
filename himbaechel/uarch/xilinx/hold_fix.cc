@@ -239,11 +239,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
     }
 
     // Bind the detour.  Any collision (a wire taken since Dijkstra) aborts and
-    // restores the original branch.  STRENGTH_STRONG, not locked: the next
-    // router2 run may rip this arc for congestion on the trunk it shares and
-    // route the sink through another pip, which it can only bind if it can
-    // lift this one.  A detour lost that way shows up in the hold re-analysis
-    // below and the next pass fixes it again.
+    // restores the original branch.
     std::vector<PipId> bound;
     for (PipId p : path) {
         WireId d = ctx->getPipDstWire(p);
@@ -254,7 +250,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
             rollback();
             return false;
         }
-        ctx->bindPip(p, net, STRENGTH_STRONG);
+        ctx->bindPip(p, net, STRENGTH_LOCKED);
         bound.push_back(p);
     }
     return acc >= target;
