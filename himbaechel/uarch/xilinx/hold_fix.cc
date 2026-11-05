@@ -653,7 +653,27 @@ void XilinxImpl::fixup_hold()
             // retag after any undo erasures so get_tags() stays valid.
             ctx->assignArchInfo();
             assign_cell_tags();
+            // With --tmg-ripup, router2 also rips up every arc whose setup
+            // slack is under 2 * getDelayEpsilon(), until iteration 1500. This
+            // repair route only has to route the nets just unbound, so turn the
+            // ripup off for this call, and only when it is on. Read the setting
+            // as router2 does: router1's legality check stores it as the string
+            // "0".
+            auto tmg_found = ctx->idstring_str_to_idx->find("router/tmg_ripup");
+            const bool tmg_ripup_key_exists = tmg_found != ctx->idstring_str_to_idx->end();
+            const IdString tmg_ripup_key(tmg_ripup_key_exists ? tmg_found->second : 0);
+            const bool tmg_ripup_is_set = tmg_ripup_key_exists && ctx->settings.count(tmg_ripup_key) != 0;
+            const Property saved_tmg_ripup = tmg_ripup_is_set ? ctx->settings.at(tmg_ripup_key) : Property();
+            const bool tmg_ripup_is_on =
+                    tmg_ripup_is_set && ctx->setting<bool>("timing_driven") && ctx->setting<bool>("router/tmg_ripup");
+            if (tmg_ripup_is_on) {
+                ctx->settings[tmg_ripup_key] = Property(0);
+                log_info("Hold-fix: timing ripup off for this repair route.\n");
+            }
             router2(ctx, rcfg);
+            const bool restore_tmg_ripup = tmg_ripup_is_on;
+            if (restore_tmg_ripup)
+                ctx->settings[tmg_ripup_key] = saved_tmg_ripup;
         }
 
         // 4. Re-analyse.  Detours changed routing directly; feedthroughs via the
