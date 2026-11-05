@@ -106,16 +106,15 @@ struct Router2
         // Historical congestion cost
         int curr_cong = 0;
         float hist_cong_cost = 1.0;
-        // Wire is unavailable as locked to another arc
-        bool unavailable = false;
         // This wire has to be used for this net
         int reserved_net = -1;
+        static constexpr int RESERVED_UNAVAILABLE = -2;
         // The notional location of the wire, to guarantee thread safety
         int16_t x = 0, y = 0;
         // Visit data
         PipId pip_fwd, pip_bwd;
-        bool visited_fwd = false, visited_bwd = false;
-        float cost_fwd = 0.0, cost_bwd = 0.0;
+        static constexpr float NOT_VISITED = std::numeric_limits<float>::max();
+        float cost_fwd = NOT_VISITED, cost_bwd = NOT_VISITED;
     };
 
     struct PerResourceData
@@ -568,6 +567,41 @@ struct Router2
                (net->constant_value != IdString() && ctx->getWireConstantValue(cursor) == net->constant_value);
     }
 
+    // True when the arch binding of this arc runs from the sink back to the
+    // source and some wire on it is bound at STRENGTH_LOCKED or above. Such
+    // bindings are made before the router runs (hold-fix detours on xilinx,
+    // route_mult on GateMate) and bind_and_check_all leaves them bound.
+    // Ripping such an arc leaves its locked pips bound in the arch while the
+    // sink is searched again, so the search either cannot reach the sink or
+    // tries to bind a second pip into a locked wire.
+    bool arc_is_locked_to_source(NetInfo *net, store_index<PortRef> usr, size_t phys_pin)
+    {
+        auto &nd = nets.at(net->udata);
+        WireId src = nd.src_wire;
+        WireId cursor = nd.arcs.at(usr.idx()).at(phys_pin).sink_wire;
+        bool saw_lock = false;
+        // A walk back to the source visits each bound wire at most once, so
+        // more steps than bound wires means the binding is not a tree.
+        const size_t max_steps = net->wires.size();
+        for (size_t step = 0; step < max_steps && cursor != WireId(); ++step) {
+            auto it = net->wires.find(cursor);
+            const bool wire_missing = it == net->wires.end();
+            if (wire_missing)
+                return false;
+            const bool wire_is_locked = it->second.strength >= STRENGTH_LOCKED;
+            if (wire_is_locked)
+                saw_lock = true;
+            const bool reached_source = cursor == src;
+            if (reached_source)
+                return saw_lock;
+            const bool no_driving_pip = it->second.pip == PipId();
+            if (no_driving_pip)
+                return false;
+            cursor = ctx->getPipSrcWire(it->second.pip);
+        }
+        return false;
+    }
+
     void record_prerouted_net(NetInfo *net, store_index<PortRef> usr, size_t phys_pin)
     {
         auto &nd = nets.at(net->udata);
@@ -626,7 +660,7 @@ struct Router2
         // and LUT
         if (iter_count > 7)
             return false; // heuristic to assume we've hit general routing
-        if (wire_data(wire).unavailable)
+        if (wire_data(wire).reserved_net == PerWireData::RESERVED_UNAVAILABLE)
             return true;
         if (wire_data(wire).reserved_net != -1 && wire_data(wire).reserved_net != net->udata)
             return true; // reserved for another net
@@ -661,6 +695,8 @@ struct Router2
                 auto &wd = wire_data(cursor);
                 if (ctx->debug)
                     log("      %s (driver output)\n", ctx->nameOfWire(cursor));
+                if (wd.reserved_net == PerWireData::RESERVED_UNAVAILABLE)
+                    break;
                 did_something |= (wd.reserved_net != net->udata);
                 if (wd.reserved_net != -1 && wd.reserved_net != net->udata)
                     log_error("attempting to reserve driver output path wire '%s' for nets '%s' and '%s'\n",
@@ -708,6 +744,8 @@ struct Router2
                 auto &wd = wire_data(cursor);
                 if (ctx->debug)
                     log("      %s (sink input)\n", ctx->nameOfWire(cursor));
+                if (wd.reserved_net == PerWireData::RESERVED_UNAVAILABLE)
+                    break;
                 did_something |= (wd.reserved_net != net->udata);
                 if (wd.reserved_net != -1 && wd.reserved_net != net->udata)
                     log_error("attempting to reserve sink input path wire '%s' for nets '%s' and '%s'\n",
@@ -770,10 +808,8 @@ struct Router2
         for (auto w : t.dirty_wires) {
             flat_wires[w].pip_fwd = PipId();
             flat_wires[w].pip_bwd = PipId();
-            flat_wires[w].visited_fwd = false;
-            flat_wires[w].visited_bwd = false;
-            flat_wires[w].cost_fwd = 0.0;
-            flat_wires[w].cost_bwd = 0.0;
+            flat_wires[w].cost_fwd = PerWireData::NOT_VISITED;
+            flat_wires[w].cost_bwd = PerWireData::NOT_VISITED;
         }
         t.dirty_wires.clear();
     }
@@ -807,29 +843,27 @@ struct Router2
     void set_visited_fwd(ThreadContext &t, int wire, PipId pip, float cost)
     {
         auto &wd = flat_wires.at(wire);
-        if (!wd.visited_fwd && !wd.visited_bwd)
+        if (wd.cost_fwd == PerWireData::NOT_VISITED && wd.cost_bwd == PerWireData::NOT_VISITED)
             t.dirty_wires.push_back(wire);
         wd.pip_fwd = pip;
-        wd.visited_fwd = true;
         wd.cost_fwd = cost;
     }
     void set_visited_bwd(ThreadContext &t, int wire, PipId pip, float cost)
     {
         auto &wd = flat_wires.at(wire);
-        if (!wd.visited_fwd && !wd.visited_bwd)
+        if (wd.cost_fwd == PerWireData::NOT_VISITED && wd.cost_bwd == PerWireData::NOT_VISITED)
             t.dirty_wires.push_back(wire);
         wd.pip_bwd = pip;
-        wd.visited_bwd = true;
         wd.cost_bwd = cost;
     }
 
     bool was_visited_fwd(int wire, float cost)
     {
-        return flat_wires.at(wire).visited_fwd && flat_wires.at(wire).cost_fwd <= cost;
+        return flat_wires.at(wire).cost_fwd != PerWireData::NOT_VISITED && flat_wires.at(wire).cost_fwd <= cost;
     }
     bool was_visited_bwd(int wire, float cost)
     {
-        return flat_wires.at(wire).visited_bwd && flat_wires.at(wire).cost_bwd <= cost;
+        return flat_wires.at(wire).cost_bwd != PerWireData::NOT_VISITED && flat_wires.at(wire).cost_bwd <= cost;
     }
 
     float get_arc_crit(NetInfo *net, store_index<PortRef> i)
@@ -988,7 +1022,7 @@ struct Router2
                             continue;
                         }
                         auto &nwd = flat_wires.at(next_idx);
-                        if (nwd.unavailable)
+                        if (nwd.reserved_net == PerWireData::RESERVED_UNAVAILABLE)
                             continue;
                         // Reserved for another net
                         if (nwd.reserved_net != -1 && nwd.reserved_net != net->udata)
@@ -1065,7 +1099,7 @@ struct Router2
                             continue;
                         }
                         auto &nwd = flat_wires.at(next_idx);
-                        if (nwd.unavailable)
+                        if (nwd.reserved_net == PerWireData::RESERVED_UNAVAILABLE)
                             continue;
                         // Reserved for another net
                         if (nwd.reserved_net != -1 && nwd.reserved_net != net->udata)
@@ -1212,9 +1246,13 @@ struct Router2
         for (auto usr : net->users.enumerate()) {
             auto &ad = nd.arcs.at(usr.index.idx());
             for (size_t j = 0; j < ad.size(); j++) {
-                // Ripup failed arcs to start with
+                // Ripup failed arcs to start with, but keep a locked binding
+                // that still reaches the source: it cannot be routed again.
                 // Check if arc is already legally routed
-                if (!failed_slack && check_arc_routing(net, usr.index, j)) {
+                const bool locked_to_source = arc_is_locked_to_source(net, usr.index, j);
+                const bool keep_existing_route =
+                        locked_to_source || (!failed_slack && check_arc_routing(net, usr.index, j));
+                if (keep_existing_route) {
                     update_wire_by_loc(t, net, usr.index, j, true);
                     continue;
                 }
@@ -2427,14 +2465,20 @@ struct Router2
                     nets_by_runtime.at(i).first / 1000.0);
             }
         }
+
+        // Check what we did was actually legal
+        ctx->check();
+        ctx->checkRoutedDesign();
+
         auto rend = std::chrono::high_resolution_clock::now();
+
+        log_info("Checksum: 0x%08x\n", ctx->checksum());
         log_info("Router2 time %.02fs\n", std::chrono::duration<float>(rend - rstart).count());
 
-        log_info("Running router1 to check that route is legal...\n");
+        timing_analysis(ctx, true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
+                        true /* warn_on_failure */, true /* update_results */);
 
         lock.unlock();
-
-        router1(ctx, Router1Cfg(ctx));
     }
 };
 } // namespace
