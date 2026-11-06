@@ -200,6 +200,8 @@ struct XilinxImpl : HimbaechelAPI
     void fixup_routing();
     void fixup_hold();
     void route_clocks();
+    IdString clock_source_port(const NetInfo *net) const;
+    void name_clocks_after_ports();
 
     virtual std::string getDefaultRouter() const override { return "router2"; };
 
