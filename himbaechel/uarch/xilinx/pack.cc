@@ -958,6 +958,24 @@ void XilinxPacker::pack_constants()
         get_tied_pins(ctx, tied_pins);
     if (invertible_pins.empty())
         get_invertible_pins(ctx, invertible_pins);
+    // SRLC16E is not a constid. Naming it while the invertible list is
+    // built would intern the name on a design that has no such cell and
+    // shift every later id. The netlist has already interned the name
+    // when a cell of this type is present, so a clock tied to zero folds
+    // the same way as on SRL16E and SRLC32E. pack_srls renames
+    // IS_CLK_INVERTED to IS_WCLK_INVERTED.
+    bool seen_srlc16e = false;
+    IdString srlc16e_type;
+    for (auto &cell : ctx->cells) {
+        const bool is_srlc16e = cell.second->type.str(ctx) == "SRLC16E";
+        if (is_srlc16e) {
+            seen_srlc16e = true;
+            srlc16e_type = cell.second->type;
+        }
+    }
+    const bool any_srlc16e = seen_srlc16e;
+    if (any_srlc16e)
+        invertible_pins[srlc16e_type].insert(id_CLK);
     if (!ctx->cells.count(ctx->id("$PACKER_GND_DRV"))) {
         CellInfo *gnd_cell = ctx->createCell(ctx->id("$PACKER_GND_DRV"), id_PSEUDO_GND);
         gnd_cell->addOutput(id_Y);
