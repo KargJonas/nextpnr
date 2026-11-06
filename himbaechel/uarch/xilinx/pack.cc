@@ -880,6 +880,23 @@ void XilinxPacker::constrain_srl_cascades()
                           "but the cell is already locked above the A LUT and Q is in use.\n",
                           ci->name.c_str(ctx));
             }
+            // A user BEL is applied by the placer, after this pass. B/C/D
+            // MC31 cannot leave the slice, so a BEL above the A LUT used to
+            // place, then fail while routing the MC31 arc. Say so here.
+            const bool user_named_a_bel = ci->attrs.count(id_BEL) != 0;
+            if (user_named_a_bel) {
+                const std::string bel_name = ci->attrs.at(id_BEL).as_string();
+                BelId wanted = ctx->getBelByNameStr(bel_name);
+                const bool bel_name_resolves = wanted != BelId();
+                if (bel_name_resolves) {
+                    const int letter = ctx->getBelLocation(wanted).z >> 4;
+                    const bool bel_is_above_a = letter != 0;
+                    if (bel_is_above_a)
+                        log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can "
+                                  "do, but BEL '%s' is above the A LUT and Q is in use.\n",
+                                  ci->name.c_str(ctx), bel_name.c_str());
+                }
+            }
             const bool already_at_a = ci->constr_abs_z && ((ci->constr_z >> 4) == 0);
             const bool needs_the_a_lut = !already_at_a;
             if (needs_the_a_lut) {
