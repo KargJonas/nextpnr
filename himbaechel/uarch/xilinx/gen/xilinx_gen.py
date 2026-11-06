@@ -232,13 +232,13 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         gnd = tt.create_bel(f"PSEUDO_GND", f"PSEUDO_GND", z=0)
         gnd.site = -1
         gnd.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_GND"))
-        gnd.flags |= BEL_FLAG_GLOBAL
+        gnd.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
         tt.add_bel_pin(gnd, "Y", "GND", PinType.OUTPUT)
 
         vcc = tt.create_bel(f"PSEUDO_VCC", f"PSEUDO_VCC", z=1)
         vcc.site = -1
         vcc.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_VCC"))
-        vcc.flags |= BEL_FLAG_GLOBAL
+        vcc.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
         tt.add_bel_pin(vcc, "Y", "VCC", PinType.OUTPUT)
     def add_pip(src_wire, dst_wire, pip_class=PipClass.TILE_ROUTING, timing="",
         site_key=-1, bel_name="", pip_config=0):
