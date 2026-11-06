@@ -1283,6 +1283,10 @@ void XilinxImpl::apply_prerouted()
 // The top-level port a clock net comes from, through clock buffers and IOB
 // input buffers (the way a clock constraint propagates from a pad), or
 // IdString() if there is none or a buffer has more than one clock input.
+// A BUFR is followed from O back to I only when BUFR_DIVIDE is BYPASS or
+// the parameter is absent: a divider is a different clock and keeps its
+// net's name. BUFR_DIVIDE is not a constid, so the name is matched as a
+// string, the way the BUFGMUX types are, and no id is created.
 IdString XilinxImpl::clock_source_port(const NetInfo *net) const
 {
     static const dict<IdString, std::vector<IdString>> clock_inputs = {
@@ -1296,6 +1300,28 @@ IdString XilinxImpl::clock_source_port(const NetInfo *net) const
                 return user.cell->name;
         }
         const CellInfo *buf = net->driver.cell;
+        const bool is_undivided_bufr = buf != nullptr && buf->type == id_BUFR_BUFR && net->driver.port == id_O;
+        if (is_undivided_bufr) {
+            std::string divide = "BYPASS";
+            for (const auto &param : buf->params) {
+                const bool is_divide_param = param.first.str(ctx) == "BUFR_DIVIDE";
+                if (is_divide_param) {
+                    const bool value_is_string = param.second.is_string;
+                    if (value_is_string)
+                        divide = param.second.str;
+                    break;
+                }
+            }
+            const bool passes_the_clock = divide == "BYPASS";
+            if (!passes_the_clock)
+                return IdString();
+            const NetInfo *clock_in = buf->getPort(id_I);
+            const bool carries_a_signal = clock_in != nullptr && clock_in->constant_value == IdString();
+            if (!carries_a_signal)
+                return IdString();
+            net = clock_in;
+            continue;
+        }
         auto inputs = buf == nullptr ? clock_inputs.end() : clock_inputs.find(buf->type);
         const bool is_a_buffer = inputs != clock_inputs.end();
         if (!is_a_buffer)
