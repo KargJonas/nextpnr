@@ -645,14 +645,18 @@ def main():
     ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
     ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
     ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
-    lut = ch.timing.add_cell_variant("DEFAULT", "SLICE_LUTX")
-    for i in range(1, 6+1):
-        lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
-        if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
-    for i in range(1, 8+1):
-        lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
-    lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
-    lut.add_setup_hold("CLK", "DI1", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
+    def add_lut_timing(lut):
+        for i in range(1, 6+1):
+            lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
+            if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
+        for i in range(1, 8+1):
+            lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
+        lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
+        lut.add_setup_hold("CLK", "DI1", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
+        # DI2 is the data input of the O6 half of a 32-deep LUT-RAM (RAMD32 at
+        # O6) and of an SRL16E: without a setup check those writes go untimed.
+        lut.add_setup_hold("CLK", "DI2", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
+    add_lut_timing(ch.timing.add_cell_variant("DEFAULT", "SLICE_LUTX"))
     ff = ch.timing.add_cell_variant("DEFAULT", "SLICE_FFX")
     ff.add_setup_hold("CK", "CE", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
     ff.add_setup_hold("CK", "SR", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
@@ -668,6 +672,27 @@ def main():
     import_sdf_timings(mux, slicem_sdf.cells[("SELMUX2_1", "SLICEM/F7BMUX")])
     carry = ch.timing.add_cell_variant("DEFAULT", "CARRY4")
     import_sdf_timings(carry, slicem_sdf.cells[("CARRY4", "SLICEM")])
+    # A LUT-RAM or SRL output also changes on the clock, after a write or a
+    # shift. Those cells take one of these variants (assign_cell_tags in
+    # xilinx.cc): the LUT arcs above plus clock-to-out, the slowest of the four
+    # LUTs in the SDF. They are named after the attribute the packer gives
+    # those cells, which is no cell type, so nothing else picks them up.
+    def sdf_clock_out(celltype, port):
+        arcs = [e for (ct, inst), cell in slicem_sdf.cells.items() if ct == celltype for e in cell.entries
+                if isinstance(e, parse_sdf.IOPath) and e.from_pin == "CLK" and e.to_pin == port]
+        if not arcs:
+            return None
+        return TimingValue(int(min(min(e.rising.minv, e.falling.minv) for e in arcs)*1000),
+            int(max(max(e.rising.maxv, e.falling.maxv) for e in arcs)*1000))
+    for variant, outputs in (("X_LUT_AS_DRAM", (("O6", "LUT_OR_MEM6LRAM"), ("O5", "LUT_OR_MEM5LRAM"))),
+                             ("X_LUT_AS_SRL", (("O6", "LUT_OR_MEM6SHFREG"), ("MC31", "LUT_OR_MEM6SHFREG")))):
+        clock_outs = [(port, sdf_clock_out(celltype, port)) for port, celltype in outputs]
+        if any(delay is None for port, delay in clock_outs):
+            continue
+        mem = ch.timing.add_cell_variant("DEFAULT", variant)
+        add_lut_timing(mem)
+        for port, delay in clock_outs:
+            mem.add_clock_out("CLK", port, ClockEdge.RISING, delay)
 
     import_bram_timings(ch.timing, parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "BRAM_L.sdf")), is_virtex7)
 

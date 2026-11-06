@@ -1471,6 +1471,15 @@ void XilinxImpl::assign_cell_tags()
             ct.lut.memory_group = 0; // fixme
             ct.lut.is_srl = ci->attrs.count(id_X_LUT_AS_SRL);
             ct.lut.is_memory = ci->attrs.count(id_X_LUT_AS_DRAM);
+            // A LUT-RAM or SRL output also changes on the clock: those cells take the
+            // timing the chipdb keeps under their attribute, with clock-to-out arcs.
+            const bool lut_is_clocked = ct.lut.is_srl || ct.lut.is_memory;
+            if (lut_is_clocked) {
+                const int mem_timing = ctx->get_cell_timing_idx(ct.lut.is_srl ? id_X_LUT_AS_SRL : id_X_LUT_AS_DRAM);
+                const bool chipdb_has_mem_timing = mem_timing != -1;
+                if (chipdb_has_mem_timing)
+                    ci->timing_index = mem_timing;
+            }
             ct.lut.only_drives_carry = false;
             if (ci->cluster != ClusterId() && ct.lut.output_count > 0 && ct.lut.output_sigs[0] != nullptr &&
                 ct.lut.output_sigs[0]->users.entries() == 1 &&
