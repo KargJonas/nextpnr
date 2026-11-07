@@ -103,7 +103,7 @@ Line counts are `wc -l` on the checkout.
 | `xilinx.cc` | 820 | Uarch registration (`XilinxArch`, `match_device` on `xc7*`); device regex + die alias (`xc7a35t`→`xc7a50t`); `init_database`/`init`; `getUArchOptions` (`--fasm`, `--xdc`); bel/pip legality (`is_pip_unavail`, `update_logic_bel`, `update_bram_bel`); `assign_cell_tags`/`index_control_sets`; routing delay heuristics (`estimateDelay`/`predictDelay`/`getRouteBoundingBox`, `find_source_sink_locs`); placer config; `prePlace`/`postPlace`/`preRoute`/`postRoute`; `route_clocks`. |
 | `cells.cc` | 197 | `XilinxPacker::create_cell` — physical cell templates (ports) for `SLICE_LUTX`, `SLICE_FFX`, `RAMD64E`, `RAMD32`, `MUXF7/8/9`, `CARRY8`, `MUXCY`, `XORCY`, `PAD`, IO buffers (`IBUF*`/`OBUF*`/`IOBUF*`/`DIFFINBUF`/`INBUF`/`IBUFCTRL`/`HPIO_VREF`), `INV`, `IDELAYCTRL`, `CARRY4`; `create_lut` helper. |
 | `pack.h` | 221 | `XilinxPacker`/`XC7Packer` interfaces: `XFormRule` (generic cell→physical transform), `DRAMControlSet`/`DRAMType`, `CarryGroup`, all `pack_*`/`xform_*`/`insert_*` declarations. |
-| `pack.cc` | 849 | `XilinxImpl::pack()` pipeline + generic transforms. `pack_luts` (LUT1-6/LUT6_2→`SLICE_LUTX`), `pack_ffs` (FD*→`SLICE_FFX`), `pack_lutffs`, `pack_inverters` (INV→LUT1), `pack_srls` (SRL16E/SRLC32E→LUT), `pack_muxfs`/`finalise_muxfs` (MUXF7/8→`SELMUX2_1`, MUXF9 rejected on xc7), `pack_constants`, `pack_bram`, `feed_through_lut/muxf`, `xform_cell`/`generic_xform`. Pack order at `pack.cc:821-848`. |
+| `pack.cc` | 1695 | `XilinxImpl::pack()` pipeline + generic transforms. `pack_luts` (LUT1-6/LUT6_2→`SLICE_LUTX`), `pack_ffs` (FD*→`SLICE_FFX`), `pack_lutffs`, `pack_inverters` (INV→LUT1), `pack_srls` (SRL16E/SRLC16E/SRLC32E→LUT, then `constrain_srl_cascades`), `pack_muxfs`/`finalise_muxfs` (MUXF7/8→`SELMUX2_1`, MUXF9 rejected on xc7), `pack_constants`, `pack_bram`, `feed_through_lut/muxf`, `xform_cell`/`generic_xform`. Pack order at `pack.cc:1652-1679`. |
 | `pack_carry.cc` | 403 | Carry-chain packing: `split_carry4s` (CARRY4→MUXCY/XORCY), `pack_carries` (re-group MUXCY/XORCY chains into `CARRY4`, constrain LUTs above/below, fold CI/CO, blast non-chain MUXCY→LUT3 / XORCY→LUT2). |
 | `pack_dram.cc` | 527 | Distributed RAM packing: `dram_types` map (RAM32X1S/D … RAM512X1S/D); RAM64X1S/D, RAM32X1D, RAM128/256X1S/D (with MUXF7/8 decode trees), whole-slice RAM32M/RAM64M; DRAM→`SLICE_LUTX` (`X_LUT_AS_DRAM`). |
 | `pack_dsp_xc7.cc` | 197 | `DSP48E1`→`DSP48E1_DSP48E1`; DSP cascade (`walk_dsp`), GND/VCC pin harvesting into `DSP_GND_PINS`/`DSP_VCC_PINS` attrs. |
@@ -140,7 +140,7 @@ Line counts are `wc -l` on the checkout.
 | MUXF9 / F9MUX | ❌ **rejected on xc7** (`log_error`) | `pack.cc:442` |
 | CARRY4 | ✅ (MUXCY/XORCY chain reassembly; leftovers soft-blasted to LUT2/LUT3) | `pack_carry.cc` |
 | CARRY8 | declared in `cells.cc:80` but **not packed** (UltraScale path) | `cells.cc:80-89` |
-| SRL16E / SRLC32E | ✅ to `SLICE_LUTX` (`X_LUT_AS_SRL`); **Q31 unsupported** | `pack.cc:481-525` (FIXME `:497`) |
+| SRL16E / SRLC16E / SRLC32E | ✅ to `SLICE_LUTX` (`X_LUT_AS_SRL`); a Q31 cascade of up to four SRLC32E sits in D,C,B,A of one slice; a Q31 that leaves its slice goes through `DOUTMUX` from the A LUT when Q is in use (packer error if the cell is already locked above the A LUT, by constraint or `BEL`), otherwise it moves onto Q with the address tied to 31; a used SRLC16E Q15 is locked to the A LUT | `pack.cc:667-769` (`pack_srls`), `:835-868` (D,C,B,A), `:927-967` (`DOUTMUX`), `:969-985` (onto Q); `fasm.cc:715-721` |
 
 ### Distributed RAM
 
@@ -340,7 +340,9 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **No true differential output** — `pack_io.cc:259` (`FIXME: true diff outputs`); diff outputs
   are emulated with an inverter into the N pin.
 - **MUXF9/F9MUX rejected** on xc7 — `pack.cc:442` (`log_error("MUXF9 is not supported on xc7!")`).
-- **SRL Q31 not implemented** — `pack.cc:497` (`FIXME: Q31 support`).
+- **SRL Q31 out of a slice needs the A LUT when Q is in use** — only the A LUT's `MC31` reaches
+  `DOUTMUX`; a cell already locked above the A LUT, or in another cluster, is a packer error
+  (`pack.cc:927-961`).
 - **Routing delay model is deliberately coarse** — `xilinx.cc:767` and `:778`
   (`TODO: improve sophistication here based on old nextpnr-xilinx code`); pip/placer delay
   estimates are heuristics.
