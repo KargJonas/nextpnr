@@ -140,7 +140,7 @@ Line counts are `wc -l` on the checkout.
 | MUXF9 / F9MUX | ❌ **rejected on xc7** (`log_error`) | `pack.cc:442` |
 | CARRY4 | ✅ (MUXCY/XORCY chain reassembly; leftovers soft-blasted to LUT2/LUT3) | `pack_carry.cc` |
 | CARRY8 | declared in `cells.cc:80` but **not packed** (UltraScale path) | `cells.cc:80-89` |
-| SRL16E / SRLC16E / SRLC32E | ✅ to `SLICE_LUTX` (`X_LUT_AS_SRL`); a Q31 cascade of up to four SRLC32E sits in D,C,B,A of one slice; a Q31 that leaves its slice goes through `DOUTMUX` from the A LUT when Q is in use (packer error if the cell is already locked above the A LUT, by constraint or `BEL`), otherwise it moves onto Q with the address tied to 31; a used SRLC16E Q15 is locked to the A LUT | `pack.cc:667-769` (`pack_srls`), `:835-868` (D,C,B,A), `:927-967` (`DOUTMUX`), `:969-985` (onto Q); `fasm.cc:715-721` |
+| SRL16E / SRLC16E / SRLC32E | ✅ to `SLICE_LUTX` (`X_LUT_AS_SRL`); Q31 cascades of up to four SRLC32E in D,C,B,A of one slice; an off-slice Q31 moves onto Q when Q is unused or already reads bit 31, otherwise it leaves the A LUT through `DOUTMUX`; a used SRLC16E Q15 is locked to the A LUT | `pack.cc:667-769` (`pack_srls`), `:835-868` (D,C,B,A), `:911-926` and `:969-985` (onto Q), `:927-967` (`DOUTMUX`); `fasm.cc:715-721` |
 
 ### Distributed RAM
 
@@ -340,9 +340,9 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **No true differential output** — `pack_io.cc:259` (`FIXME: true diff outputs`); diff outputs
   are emulated with an inverter into the N pin.
 - **MUXF9/F9MUX rejected** on xc7 — `pack.cc:442` (`log_error("MUXF9 is not supported on xc7!")`).
-- **SRL Q31 out of a slice needs the A LUT when Q is in use** — only the A LUT's `MC31` reaches
-  `DOUTMUX`; a cell already locked above the A LUT, or in another cluster, is a packer error
-  (`pack.cc:927-961`).
+- **SRL Q31 out of a slice needs the A LUT when Q reads another address** — only the A LUT's
+  `MC31` reaches `DOUTMUX`; a cell already locked above the A LUT, or in another cluster, is a
+  packer error (`pack.cc:927-961`).
 - **Routing delay model is deliberately coarse** — `xilinx.cc:767` and `:778`
   (`TODO: improve sophistication here based on old nextpnr-xilinx code`); pip/placer delay
   estimates are heuristics.
