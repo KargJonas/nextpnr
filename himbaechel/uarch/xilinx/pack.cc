@@ -769,18 +769,17 @@ void XilinxPacker::pack_srls()
 }
 
 // SRLC32E cascades (shift registers deeper than 32, chained through Q31).
-// The MC31 wire Q31 maps to only exists INSIDE a SLICEM: the cascade muxes
-// run top-down D->C->B->A (xDI1MUX <- (x+1)MC31) and no route from MC31 to
-// the general fabric exists.  Two consequences the packer must handle, or
-// the placer scatters the chain and the MC31 arc is physically unroutable:
+// MC31 of the B, C and D LUTs only feeds the downward DI1 cascade
+// (xDI1MUX <- (x+1)MC31). MC31 of the A LUT is the DOUTMUX input, so that
+// one output can leave the slice. Two consequences, or the placer scatters
+// the chain and the MC31 arc is physically unroutable:
 //
 //  - a cascade group of up to four SRLs must occupy D,C,B,A of ONE slice,
 //    exactly like a carry chain (cluster, head at D);
-//  - any Q31 link that cannot stay inside a slice (fifth and later chain
-//    elements, or a Q31 consumer that is not another SRL's D) must instead
-//    leave through the ordinary Q output with the read address tied to 31
-//    -- the same value, fabric-routable.  Only possible when Q is unused,
-//    but a used Q means the design also taps that segment live.
+//  - a Q31 link that cannot stay inside a slice leaves through DOUTMUX when
+//    Q is also used, which means the cell has to sit on the A LUT. When Q
+//    is unused the old rewrite stays: the link moves onto Q and the read
+//    address is tied to 31.
 //
 // (Port of nextpnr-xilinx pack.cc constrain_srl_cascades(); the fork's
 // constr_parent/constr_children grouping is re-expressed with the upstream
@@ -898,6 +897,7 @@ void XilinxPacker::constrain_srl_cascades()
     }
 
     int rewired = 0;
+    int fabric = 0;
     for (auto ci : offslice) {
         NetInfo *q31 = ci->getPort(id_MC31);
         if (q31 == nullptr)
@@ -907,9 +907,10 @@ void XilinxPacker::constrain_srl_cascades()
             continue;
         }
         NetInfo *q = ci->getPort(id_O6);
-        bool q_output_is_used = q != nullptr && !q->users.empty();
+        const bool q_output_is_used = q != nullptr && !q->users.empty();
         if (q_output_is_used) {
-            if (reads_bit31(ci)) {
+            const bool address_already_31 = reads_bit31(ci);
+            if (address_already_31) {
                 // Q already reads bit 31, so it carries the very value Q31
                 // does: fold the off-slice Q31 consumers into the Q net.
                 std::vector<PortRef> users;
@@ -923,11 +924,47 @@ void XilinxPacker::constrain_srl_cascades()
                 rewired++;
                 continue;
             }
-            log_error("SRL '%s': its Q31 cascade must go through the fabric (chain deeper than 128 bits, or a "
-                      "non-SRL consumer), which needs the Q output with the read address tied to 31 -- but Q is "
-                      "already in use with another address. Restructure the shift register (srl_style/shreg "
-                      "attributes) so this segment is not tapped.\n",
-                      ci->name.c_str(ctx));
+            // B/C/D MC31 cannot leave the slice. A cell already locked there,
+            // or already a member of another cluster, still cannot reach
+            // DOUTMUX without a placer change.
+            const bool locked_above_a = ci->constr_abs_z && ((ci->constr_z >> 4) != 0);
+            if (locked_above_a) {
+                log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can do, "
+                          "but the cell is already locked above the A LUT and Q is in use.\n",
+                          ci->name.c_str(ctx));
+            }
+            // A user BEL is applied by the placer, after this pass. B/C/D
+            // MC31 cannot leave the slice, so a BEL above the A LUT used to
+            // place, then fail while routing the MC31 arc. Say so here.
+            const bool user_named_a_bel = ci->attrs.count(id_BEL) != 0;
+            if (user_named_a_bel) {
+                const std::string bel_name = ci->attrs.at(id_BEL).as_string();
+                BelId wanted = ctx->getBelByNameStr(bel_name);
+                const bool bel_name_resolves = wanted != BelId();
+                if (bel_name_resolves) {
+                    const int letter = ctx->getBelLocation(wanted).z >> 4;
+                    const bool bel_is_above_a = letter != 0;
+                    if (bel_is_above_a)
+                        log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can "
+                                  "do, but BEL '%s' is above the A LUT and Q is in use.\n",
+                                  ci->name.c_str(ctx), bel_name.c_str());
+                }
+            }
+            const bool already_at_a = ci->constr_abs_z && ((ci->constr_z >> 4) == 0);
+            const bool needs_the_a_lut = !already_at_a;
+            if (needs_the_a_lut) {
+                const bool already_in_a_cluster = ci->cluster != ClusterId() || !ci->constr_children.empty();
+                if (already_in_a_cluster) {
+                    log_error("SRL '%s': its Q31 cascade must go through the fabric, which only an A LUT can do, "
+                              "but the cell is already in another cluster and Q is in use.\n",
+                              ci->name.c_str(ctx));
+                }
+                ci->cluster = ci->name;
+                ci->constr_abs_z = true;
+                ci->constr_z = (0 << 4) | BEL_6LUT;
+            }
+            fabric++;
+            continue;
         }
         ci->disconnectPort(id_MC31);
         if (q != nullptr)
@@ -947,10 +984,14 @@ void XilinxPacker::constrain_srl_cascades()
         }
         rewired++;
     }
-    bool anything_changed = clusters || rewired;
-    if (anything_changed)
+    const bool report_cascades = clusters || rewired || fabric;
+    if (report_cascades) {
         log_info("Constrained %d SRL cascade group(s) into single slices, moved %d Q31 link(s) to Q[31]\n", clusters,
                  rewired);
+        const bool any_fabric_q31 = fabric != 0;
+        if (any_fabric_q31)
+            log_info("Locked %d SRL Q31 output(s) to the A LUT so they leave through DOUTMUX\n", fabric);
+    }
 }
 
 void XilinxPacker::pack_constants()
