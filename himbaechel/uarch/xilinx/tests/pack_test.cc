@@ -216,8 +216,8 @@ TEST_F(XilinxPackTest, pack_srl_cascade_pair)
 TEST_F(XilinxPackTest, pack_srl_cascade_offslice)
 {
     // A five-deep chain cannot fit in one slice: the link between the 4th and
-    // 5th element must leave through the ordinary Q output with the read
-    // address tied to 31, because no fabric route exists from MC31.
+    // 5th element leaves the slice. Q has no users, so the link moves onto Q
+    // with the read address tied to 31, instead of leaving the A LUT through DOUTMUX.
     XC7Packer p(ctx, xil);
     p.pack_constants();
 
