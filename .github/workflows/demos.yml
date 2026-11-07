@@ -650,15 +650,51 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Same failure as arch_ci: a trickling Azure mirror never trips
+      # Acquire::http::Timeout, so the download has its own cap and retries
+      # on the next mirror.  The lists are unchanged.  pip is unchanged.
+      - name: Apt cache key (build deps)
+        id: apt-build-key
+        timeout-minutes: 10
+        run: nextpnr/.github/ci/apt-install.sh key nextpnr/.github/ci/apt-demos-build.list
+
+      - name: Restore apt packages (build deps)
+        id: apt-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/apt-demos-build
+          key: ${{ steps.apt-build-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-build-key.outputs.prefix-image }}
+            ${{ steps.apt-build-key.outputs.prefix-os }}
+
       - name: Install build deps
+        timeout-minutes: 35
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y git make cmake libboost-all-dev python3-dev
+          nextpnr/.github/ci/apt-install.sh install nextpnr/.github/ci/apt-demos-build.list "${{ runner.temp }}/apt-demos-build"
           pip install fasm intervaltree progressbar2 simplejson pyyaml
+
+      - name: Apt cache key (yosys)
+        if: matrix.source == 'example' || matrix.lvs
+        id: apt-yosys-key
+        timeout-minutes: 10
+        run: nextpnr/.github/ci/apt-install.sh key nextpnr/.github/ci/apt-demos-yosys.list
+
+      - name: Restore apt packages (yosys)
+        if: matrix.source == 'example' || matrix.lvs
+        id: apt-yosys-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/apt-demos-yosys
+          key: ${{ steps.apt-yosys-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-yosys-key.outputs.prefix-image }}
+            ${{ steps.apt-yosys-key.outputs.prefix-os }}
 
       - name: Install yosys
         if: matrix.source == 'example' || matrix.lvs
-        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y yosys
+        timeout-minutes: 35
+        run: nextpnr/.github/ci/apt-install.sh install nextpnr/.github/ci/apt-demos-yosys.list "${{ runner.temp }}/apt-demos-yosys"
 
       # Eigen is header-only; build it from a fixed gitlab tag.  placer_heap
       # solves a sparse system with Eigen's iterative solver whose numerics

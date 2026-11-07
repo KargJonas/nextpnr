@@ -32,14 +32,32 @@ jobs:
       with:
         submodules: recursive
 
+    # azure.archive.ubuntu.com sometimes sends only a trickle, which never
+    # trips Acquire::http::Timeout, and Install ran to its 45 minute
+    # cap.  The debs are restored from the Actions cache; a miss downloads
+    # under a per-attempt cap and retries on the next mirror.  The list is
+    # .github/ci/apt-arch.list, the same file Cache-apt saves on a push to main.
+    - name: Apt cache key
+      id: apt-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key .github/ci/apt-arch.list
+
+    - name: Restore apt packages
+      id: apt-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/apt-arch
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-key.outputs.prefix-image }}
+          ${{ steps.apt-key.outputs.prefix-os }}
+
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
     - name: Install
-      timeout-minutes: 45
-      run: |
-        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-        sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install git make cmake libboost-all-dev python3-dev pypy3 libeigen3-dev tcl-dev lzma-dev libftdi-dev clang bison flex swig qt6-base-dev iverilog libreadline-dev liblzma-dev cargo rustc
+      timeout-minutes: 35
+      run: .github/ci/apt-install.sh install .github/ci/apt-arch.list "${{ runner.temp }}/apt-arch"
 
     - name: Cache yosys installation
       uses: actions/cache@v4
@@ -140,3 +158,52 @@ jobs:
           echo "::error::Eigen checkout is $head, not 3.4.0 ($EIGEN_COMMIT)"
           exit 1
         fi
+
+  # Saves the .debs for every apt list these workflows install.  demos and
+  # regression do not run on a push to main, and a pull request can restore
+  # a cache saved on main but not one saved by another pull request, so the
+  # lists are saved here.  Each list is the file the installing job reads.
+  Cache-apt:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - list: apt-arch.list
+            cache: apt-arch
+          - list: apt-demos-build.list
+            cache: apt-demos-build
+          - list: apt-demos-yosys.list
+            cache: apt-demos-yosys
+          - list: apt-regression.list
+            cache: apt-regression
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Apt cache key
+      id: apt-key
+      timeout-minutes: 10
+      run: .github/ci/apt-install.sh key ".github/ci/${{ matrix.list }}"
+
+    - name: Restore apt packages
+      id: apt-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/${{ matrix.cache }}
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: |
+          ${{ steps.apt-key.outputs.prefix-image }}
+          ${{ steps.apt-key.outputs.prefix-os }}
+
+    - name: Install
+      timeout-minutes: 35
+      run: .github/ci/apt-install.sh install ".github/ci/${{ matrix.list }}" "${{ runner.temp }}/${{ matrix.cache }}"
+
+    - name: Save apt packages
+      if: steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/${{ matrix.cache }}
+        key: ${{ steps.apt-key.outputs.key }}

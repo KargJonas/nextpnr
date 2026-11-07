@@ -66,15 +66,29 @@ jobs:
           ref: ${{ env.DEMO_PROJECTS_REV }}
           path: demo-projects
 
+      # Same failure as arch_ci: a trickling Azure mirror never trips
+      # Acquire::http::Timeout, so the download has its own cap and retries
+      # on the next mirror.  The list is unchanged: without libboost-all-dev,
+      # configure fails on Boost_INCLUDE_DIR/program_options/iostreams, and
+      # without python3-dev the python bindings have no headers to build against.
+      - name: Apt cache key
+        id: apt-key
+        timeout-minutes: 10
+        run: nextpnr/.github/ci/apt-install.sh key nextpnr/.github/ci/apt-regression.list
+
+      - name: Restore apt packages
+        id: apt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/apt-regression
+          key: ${{ steps.apt-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.apt-key.outputs.prefix-image }}
+            ${{ steps.apt-key.outputs.prefix-os }}
+
       - name: Install dependencies
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          # Mirrors the dependency set .github/workflows/arch_ci.yml installs
-          # for its himbaechel build: without libboost-all-dev, configure fails
-          # on Boost_INCLUDE_DIR/program_options/iostreams, and without
-          # python3-dev the python bindings have no headers to build against.
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y build-essential cmake ninja-build \
-            libboost-all-dev python3-dev libeigen3-dev pkg-config yosys
+        timeout-minutes: 35
+        run: nextpnr/.github/ci/apt-install.sh install nextpnr/.github/ci/apt-regression.list "${{ runner.temp }}/apt-regression"
 
       # xc7a35t is deliberately absent: the openXC7 prjxray-db has Artix-35T
       # part directories but no xc7a35t die directory, so the part is served by
