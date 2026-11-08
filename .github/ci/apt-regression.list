@@ -1,0 +1,8 @@
+build-essential
+cmake
+ninja-build
+libboost-all-dev
+python3-dev
+libeigen3-dev
+pkg-config
+yosys

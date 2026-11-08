@@ -1,0 +1,5 @@
+git
+make
+cmake
+libboost-all-dev
+python3-dev
