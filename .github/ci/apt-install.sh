@@ -32,8 +32,8 @@ key)
   # The hash of the resolved set is only the suffix: restore-keys match the
   # prefix, so after a package update the previous debs are restored and
   # apt downloads only the difference.
-  hash=$(apt-get -s install -y "${pkgs[@]}" | grep '^Inst ' | LC_ALL=C sort |
-    sha256sum | cut -c1-16)
+  hash=$(apt-get -s install -y "${pkgs[@]}" | { grep '^Inst ' || true; } |
+    LC_ALL=C sort | sha256sum | cut -c1-16)
   prefix=$(basename "$list" .list)-${ImageOS:?}-
   {
     echo "key=$prefix${ImageVersion:?}-$hash"
