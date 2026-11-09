@@ -236,6 +236,9 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   timing engine through `getCellDelay`/`getPortTimingClass`/`getPortClockingInfo`
   (`arch.h:882-895`, defaulted in `himbaechel_api.cc:90-103`). BRAM variants select
   WTDP/WSDP × RTDP/RSDP timing by rewriting `timing_index` (`xilinx.cc:602-612`).
+  `XilinxImpl::getPortClockingInfo` (`xilinx.cc:1637`) starts from the chipdb arcs, all stored
+  as rising, and reports the falling edge for a clock the cell inverts (`IS_C_INVERTED`,
+  `IS_WCLK_INVERTED`, `IS_CLKARDCLK_INVERTED`, `IS_CLKBWRCLK_INVERTED`).
 - **Timing-driven placement**: the *static* placer is configured with timing weights
   (`timing_c/mx/my`, `xilinx.cc:361-363`); the *heap* placer is **not** given explicit timing
   weights (only HPWL scales and control-set grouping). The upstream `timing_opt.cc`
