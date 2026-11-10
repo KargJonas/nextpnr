@@ -38,7 +38,7 @@ env:
   # carrying the cases.  Fixed revisions, because the chipdb decides what the
   # cases do.
   PRJXRAY_DB_REV: a8b09269beb6e3d3c07e2a0901f845420df1c802
-  DEMO_PROJECTS_REV: 0b1ed03a5757abf7086efd474adeff0b5cfc2ad8
+  DEMO_PROJECTS_REV: 97eab98fdca41205dd3298d474c36a38bc917feb
 
 jobs:
   regression:
@@ -135,6 +135,9 @@ jobs:
           # (bram-output-register), #129 (dsp-autoreset-patdet), #130
           # (bram-output-register-clock), #132 (bufgmux) and #131 + #134
           # (ibufds-gte2-odiv2-bufgce, ibufds-gte2-shared-mgtclkout).
+          # After them, the guards of #158 (inverted-clock), #165 (the four
+          # xdc- cases), #166 (srlc16e), #167 (srl-q31-fabric,
+          # srl-q31-bel-above-a) and #174 (ff-falling-capture).
           demo-projects/regression/run.sh \
             clock-srcc-bufg bram-sdp-unused-port bufg-fabric-driven \
             config-primitive-startupe2 iddr-four-iff-flops \
@@ -146,7 +149,13 @@ jobs:
             bram-tdp-byte-enables bram-output-register bram-output-register-clock \
             dsp-autoreset-patdet bufgmux \
             ibufds-gte2-odiv2-bufgce ibufds-gte2-shared-mgtclkout \
-            dsp-const-only-pins
+            dsp-const-only-pins \
+            inverted-clock \
+            xdc-braced-names xdc-extra-positional \
+            xdc-repeated-target xdc-unbalanced \
+            srlc16e \
+            srl-q31-fabric srl-q31-bel-above-a \
+            ff-falling-capture
 
       # Failing today, on purpose and by name.  These three cases are a gap of
       # this engine alone, with no counterpart in the fork; PR #56 is still open.
