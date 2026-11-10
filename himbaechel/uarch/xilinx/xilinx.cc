@@ -133,7 +133,7 @@ void XilinxImpl::init_database(Arch *arch)
     // The speed grade is the set that prjxray-db part directories actually
     // use (1, 2, 3, 2L, 1IL, 1Q) and nothing else.  1IL and 1Q are
     // Spartan-7 grades; the previous pattern ([0-9]L?) rejected them.
-    // The grade is not a timing corner: set_speed_grade below is DEFAULT.
+    // The grade selects the chipdb's timing where it is timed per grade.
     std::regex devicere = std::regex(
             "(xc7z007s|xc7z012s|xc7z014s|xc7[azks]\\d+t?|xc7vx\\d+t?)"
             "([a-z0-9]*)(?:-(1IL|1Q|2L|[123]))?");
@@ -163,7 +163,23 @@ void XilinxImpl::init_database(Arch *arch)
     // has to pass a part-form name.
     if (!package.empty())
         arch->set_package(package);
-    arch->set_speed_grade("DEFAULT");
+    // A chipdb timed per speed grade names them as the part does (`1`, `2L`);
+    // one with X-Ray's delays alone has just DEFAULT, for every grade.
+    std::string speed = match[3].str(), grades;
+    bool graded = false;
+    for (const auto &grade : arch->chip_info->speed_grades) {
+        // As text: interning the grade would shift every later IdString.
+        graded |= IdString(grade.name).str(arch) == speed;
+        grades += (grades.empty() ? "" : ", ") + IdString(grade.name).str(arch);
+    }
+    if (grades == "DEFAULT")
+        speed = grades;
+    else if (speed.empty())
+        log_error("The chipdb is timed per speed grade (%s): name the part with its grade, as %s-1.\n",
+                  grades.c_str(), args.device.c_str());
+    else if (!graded)
+        log_error("Speed grade %s is not in the chipdb, which has %s.\n", speed.c_str(), grades.c_str());
+    arch->set_speed_grade(speed);
 }
 
 // prjxray names a bel "<site type>_<bel name>"; where the primitive is named

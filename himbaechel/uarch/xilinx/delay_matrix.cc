@@ -113,7 +113,8 @@ int XilinxImpl::measure_from(WireId src, int sx, int sy, std::vector<delay_t> &o
 
         for (auto pip : ctx->getPipsDownhill(qw.wire)) {
             WireId dst = ctx->getPipDstWire(pip);
-            delay_t nd = qw.delay + ctx->getPipDelay(pip).maxDelay();
+            // As router2 costs a step: the pip and the node it enters.
+            delay_t nd = qw.delay + ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(dst).maxDelay();
             auto prev = best.find(dst);
             bool already_reached_as_fast = prev != best.end() && prev->second <= nd;
             if (already_reached_as_fast)
