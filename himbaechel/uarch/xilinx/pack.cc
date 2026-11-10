@@ -1547,6 +1547,76 @@ void XilinxPacker::pack_inverters()
                 dead_invs.push_back(inv->name);
         }
     }
+    // A slice flip-flop and an SRL take an inverter on the clock net the same
+    // way a LUT-RAM takes one on WCLK. Yosys leaves that INV in front of C
+    // for `.C(~clk)` and in front of CLK for `.CLK(~clk)`. The port is C on
+    // FDRE/FDSE/FDCE/FDPE and CLK on SRL16E/SRLC32E/SRLC16E. A port named C
+    // on a DSP or a carry is not a clock, so the cell type gates this.
+    // SRLC16E is not a constid: its name is taken from a cell that already
+    // carries it, and is not interned on a design that has none.
+    // An FD*_1 is already a falling edge, and pack_ffs forces IS_C_INVERTED
+    // on that type, so an inverter on its clock becomes the plain primitive
+    // with the combined polarity. pack_srls renames IS_CLK_INVERTED to
+    // IS_WCLK_INVERTED afterwards, so the parameter written here is
+    // IS_CLK_INVERTED.
+    int folded_clocks = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool ff_fdre = ci->type == id_FDRE || ci->type == id_FDRE_1;
+        const bool ff_fdse = ci->type == id_FDSE || ci->type == id_FDSE_1;
+        const bool ff_fdce = ci->type == id_FDCE || ci->type == id_FDCE_1;
+        const bool ff_fdpe = ci->type == id_FDPE || ci->type == id_FDPE_1;
+        const bool slice_ff = ff_fdre || ff_fdse || ff_fdce || ff_fdpe;
+        const bool srl_known = ci->type == id_SRL16E || ci->type == id_SRLC32E;
+        const bool srlc16e = !slice_ff && !srl_known && ci->type.str(ctx) == "SRLC16E";
+        const bool srl = srl_known || srlc16e;
+        const bool foldable_clock = slice_ff || srl;
+        if (!foldable_clock)
+            continue;
+        const IdString port = slice_ff ? id_C : id_CLK;
+        const IdString param = slice_ff ? id_IS_C_INVERTED : id_IS_CLK_INVERTED;
+        NetInfo *net = ci->getPort(port);
+        const bool driven_by_inv = net != nullptr && net->driver.cell != nullptr && net->driver.cell->type == id_INV;
+        if (!driven_by_inv)
+            continue;
+        CellInfo *inv = net->driver.cell;
+        NetInfo *src = inv->getPort(id_I);
+        const bool source_net_exists = src != nullptr;
+        if (!source_net_exists)
+            continue;
+        const bool falling_variant =
+                ci->type == id_FDRE_1 || ci->type == id_FDSE_1 || ci->type == id_FDCE_1 || ci->type == id_FDPE_1;
+        const bool param_inverted = int_or_default(ci->params, param, 0) == 1;
+        // The _1 type already means inverted; pack_ffs replaces any parameter
+        // on it with IS_C_INVERTED=1. Count that once, then the inverter.
+        const bool inverted_before = falling_variant || param_inverted;
+        const bool now_inverted = !inverted_before;
+        const bool from_fdre_1 = ci->type == id_FDRE_1;
+        if (from_fdre_1)
+            ci->type = id_FDRE;
+        const bool from_fdse_1 = ci->type == id_FDSE_1;
+        if (from_fdse_1)
+            ci->type = id_FDSE;
+        const bool from_fdce_1 = ci->type == id_FDCE_1;
+        if (from_fdce_1)
+            ci->type = id_FDCE;
+        const bool from_fdpe_1 = ci->type == id_FDPE_1;
+        if (from_fdpe_1)
+            ci->type = id_FDPE;
+        ci->disconnectPort(port);
+        ci->connectPort(port, src);
+        ci->params[param] = Property(now_inverted ? 1 : 0);
+        ++folded_clocks;
+        const bool first_fold_of_this_inverter = seen_invs.insert(inv->name).second;
+        if (first_fold_of_this_inverter)
+            folded_invs.push_back(inv);
+        const bool inverter_has_no_loads_left = net->users.empty();
+        if (inverter_has_no_loads_left)
+            dead_invs.push_back(inv->name);
+    }
+    const bool any_folded_clock = folded_clocks > 0;
+    if (any_folded_clock)
+        log_info("    folded %d slice FF or SRL clock port(s)\n", folded_clocks);
     // The folded cells now use the source net. A clock constraint that named
     // only the inverted net would stay behind, and they would be timed at the
     // default period. Give it to the source net and exchange the high and low
