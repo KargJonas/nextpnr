@@ -200,6 +200,15 @@ def bc_to_bitstream(rbb_x, rbb_row, bc_idx):
             pos = pos_main + 1  # = 10
         else:
             pos = pos_main      # = 9
+    elif ri == 13:
+        # Row 28 mirrors row 2: chunk 1 of A/C and chunk 0 of B/D sit one
+        # position lower (816 vendor builds: 378 of 378 settings there; and on
+        # silicon slices B and D of that row were dead with pos_main).
+        if (slice_idx in (0, 2) and chunk == 1) or \
+           (slice_idx in (1, 3) and chunk == 0):
+            pos = pos_main - 1
+        else:
+            pos = pos_main
     else:
         pos = pos_main
 
