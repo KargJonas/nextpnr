@@ -1,0 +1,22 @@
+# nextpnr-himbaechel with the slg47910 uarch, Yosys, and the Python the
+# bitstream tools run on. `make himbaechel-image` builds it, with the Project
+# Inkwell forgefpga database as the build context `forgefpga`.
+FROM docker.io/library/ubuntu:24.04
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates python3 yosys \
+        libboost-dev libboost-filesystem-dev libboost-program-options-dev \
+        libboost-thread-dev libboost-iostreams-dev libeigen3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# The uarch's branch, until it is in nextpnr.
+ARG NEXTPNR_REPO=https://github.com/KargJonas/nextpnr
+ARG NEXTPNR_COMMIT=b6db7d21
+RUN git clone -q --branch himbaechel-slg47910 ${NEXTPNR_REPO} /src/nextpnr \
+    && git -C /src/nextpnr checkout -q ${NEXTPNR_COMMIT}
+COPY --from=forgefpga slg47910 /src/forgefpga/slg47910
+RUN cmake -S /src/nextpnr -B /src/build -DARCH=himbaechel -DHIMBAECHEL_UARCH=slg47910 \
+        -DHIMBAECHEL_SLG47910_DB=/src/forgefpga -DBUILD_PYTHON=OFF -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /src/build -j"$(nproc)" \
+    && cmake --install /src/build \
+    && rm -rf /src/build /src/nextpnr /src/forgefpga
