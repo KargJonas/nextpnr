@@ -663,7 +663,8 @@ def main():
     if timing_file:
         # An arc or check the directory lacks is X-Ray's: the carry chain's
         # (CARRY4 in the SLICEM's SDF, and CARRY4_AX, which has DI, in the CLB
-        # tile's), and the LUT-RAM's and shift register's (DI2 and O5 among them).
+        # tile's), the F7/F8 muxes', and the LUT-RAM's and shift register's (DI2
+        # and O5 among them).
         slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
         clb_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "CLBLL_L.sdf"))
         def xray(sdf, cell_type, *insts):
@@ -672,6 +673,7 @@ def main():
         srl = xray(slicem_sdf, "LUT_OR_MEM6SHFREG", "SLICEM/A6LUT", "SLICEM") + xray(slicem_sdf, "LUT_OR_MEM5SHFREG", "SLICEM/A5LUT", "SLICEM")
         timing_file.cell_variants(fallback={
             "CARRY4": xray(slicem_sdf, "CARRY4", "SLICEM") + xray(clb_sdf, "CARRY4_AX", "SLICEL"),
+            "SELMUX2_1": xray(slicem_sdf, "SELMUX2_1", "SLICEM/F7BMUX"),
             "SLICE_LUTX": ram + srl, "X_LUT_AS_DRAM": ram, "X_LUT_AS_SRL": srl})
     else:
         # Stub timing class

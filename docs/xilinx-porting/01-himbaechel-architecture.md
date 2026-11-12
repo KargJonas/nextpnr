@@ -228,9 +228,10 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   - Cell timing: `CellTimingPOD`/`CellPinTimingPOD` with comb arcs and reg arcs
     (setup/hold/clk_q) — LUT/FF stubbed in `xilinx_gen.py:450-462`; SELMUX2_1, CARRY4 and
     BRAM imported from prjxray SDF (`xilinx_gen.py:464-474`).
-- **Only one speed grade exists**: `set_speed_grades(["DEFAULT"])`
-  (`xilinx_gen.py:387`, TODO) and `init_database` calls `set_speed_grade("DEFAULT")`
-  (`xilinx.cc:91`). Real -1/-2/-3 grades are not modelled.
+- **Speed grades**: with X-Ray's delays alone there is one, `DEFAULT`, for every part.
+  With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
+  `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
+  `3`), and `init_database` picks the part's from its suffix (`xc7a100tcsg324-1`).
 - **Runtime lookups**: `Arch::get_cell_timing_idx`, `lookup_cell_delay`,
   `lookup_cell_seq_timings`, `lookup_port_tmg_type` (`arch.cc:470-520`) feed the shared
   timing engine through `getCellDelay`/`getPortTimingClass`/`getPortClockingInfo`
@@ -360,7 +361,7 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **Missing pseudo-pips** — `fasm.cc:306` (`FIXME: PPIPs missing for DSPs`), `fasm.cc:312`
   (`FIXME: PPIPs missing for SING IOI3s`), `fasm.cc:224` (`FIXME: shouldn't these be in the
   X-RAY ppips database?`).
-- **Timing database gaps** — single `DEFAULT` speed grade (`xilinx_gen.py:387`), stubbed LUT/FF
+- **Timing database gaps** — without a timing directory, single `DEFAULT` speed grade, stubbed LUT/FF
   timing (`xilinx_gen.py:450-462`), `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
   artix7 timing), `xilinx_gen.py:276` (`TODO: anything other than comb` in SDF import),
   `xilinx_gen.py:485` (`TODO: bank` for pads).
@@ -378,5 +379,6 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
   kintex7 in the default list; no UltraScale(+) in this uarch (separate ng-ultra effort).
 - Constraints: only `set_property`/`create_clock` on ports/nets; no I/O timing, multicycle,
   false-path, generated clocks, or cell/pin targets.
-- Timing: single speed grade, stub LUT/FF delays, no timing-driven post-placement optimisation.
+- Timing: without a timing directory, single speed grade and stub LUT/FF delays; no
+  timing-driven post-placement optimisation.
 - Tests/CI: no xilinx unit tests, no chipdb/P&R regression in upstream CI.

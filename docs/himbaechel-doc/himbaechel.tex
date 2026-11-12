@@ -775,8 +775,9 @@ output-clock frequencies so downstream logic is analysed against
 derived clocks.
 
 \begin{warnbox}{Timing limitations in this checkout}
-Only one speed grade (\texttt{DEFAULT}) is generated
-(\texttt{gen/xilinx\_gen.py:387}), and LUT/FF timing is stubbed rather
+Without a timing directory (\texttt{HIMBAECHEL\_XILINX\_TIMING},
+\texttt{gen/xilinx\_timing.py}), only one speed grade (\texttt{DEFAULT}) is
+generated, and LUT/FF timing is stubbed rather
 than imported from SDF (\texttt{gen/xilinx\_gen.py:450-462})---so
 timing-driven flows currently lean on BRAM/SELMUX2\_1/CARRY4 arcs plus
 heuristics. This is a known limitation tracked in the porting analysis.

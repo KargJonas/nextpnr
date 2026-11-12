@@ -234,11 +234,11 @@ class Site:
                 (self.outs if pin.dir() == "OUTPUT" else self.ins)[pin.site_wire().name()].append(f"{self.st}/{bel.name()}/{pin.name}")
 
     def least(self, names):
-        """The delays of the least (slow max) of these terms, or None."""
+        """The delays of the least (slow max) of these terms in each grade, or None."""
         known = [d for d in (self.t.timed(self.t.delays.get(n)) for n in names) if d]
         if not known:
             return None
-        return min(known, key=lambda d: d[self.t.grades[0]][3])
+        return {g: min((d[g] for d in known), key=lambda quad: quad[3]) for g in self.t.grades}
 
     def way_in(self, wire):
         return self.least(f"in:{p}" for p in self.ins[wire])
