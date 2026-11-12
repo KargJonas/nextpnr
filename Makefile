@@ -3,6 +3,7 @@
 # make flash BIN=<bitstream_mcu.bin>    program the Shrike and capture 2 s on the LA
 
 .PHONY: image flash
+.SECONDEXPANSION:
 
 image:
 	podman build -t nextpnr-slg47910 -f Containerfile .
@@ -10,7 +11,7 @@ image:
 build/chipdb.json: device/graph/minplacer.rgraph_def tools/gen_chipdb.py tools/routing_graph.py
 	python3 tools/gen_chipdb.py -o $@
 
-build/%/bitstream_mcu.bin: designs/%/%.v designs/%/%.pins build/chipdb.json
+build/%/bitstream_mcu.bin: designs/%/$$*.v designs/%/$$*.pins build/chipdb.json
 	./flow.sh designs/$*/$*.v $* designs/$*/$*.pins build/$*
 
 flash:
