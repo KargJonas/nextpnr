@@ -988,6 +988,9 @@ def emit_sdc(placement, out_file):
                 ce_nets = {ff.get('ce_net', '') for ff in ff_slices.values() if ff.get('ce_net')}
                 ce_xor = 1 if ce_nets == {'$PACKER_VCC'} else 0
                 emit_mux_sel_with_xor(f, prefix, "MUX_CE", ce_pin, ce_xor, 5)
+                # A constant clock enable is the fifth input with the chain
+                # from the block below switched off (pack.py, MUX_CE/CIN).
+                f.write(f"set_case_analysis {0 if ce_pin == 16 else 1} {prefix}/MUX_CE/CIN\n")
                 emit_mux_sel_with_xor(f, prefix, "MUX_SR", sr_pin, sr_xor, 5)
 
             # --- BC bits (LUT INIT / RAM INIT) ---

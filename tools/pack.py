@@ -432,6 +432,20 @@ def interior_mux_to_bitstream(rbb_x, rbb_row, signal):
     if rbb_row < 2 or rbb_row > 28 or (rbb_row % 2) != 0:
         return None
 
+    ri = (rbb_row - 2) // 2
+    x = rbb_x + 1
+
+    if signal == "MUX_CE/CIN":
+        # What MUX_CE's fifth input (ESEL) is: 1, the clock enable of the
+        # block below in the column (the vendor's CEin chain); 0, a constant.
+        # The vendor names no setting for it. Its bit is 0 in every block
+        # whose flip-flops have a constant clock enable (MUX_CE = ESEL, XOR:
+        # 5,274 of 5,274 in the corpus) and 1 in every other (8,827 of
+        # 8,827). Left at 1, a flip-flop above a block in use stood still on
+        # silicon.
+        return (xyp_to_word(x, 31, _INTERIOR_MUX_POS_OTHER[ri]),
+                _interior_mux_row_bit(ri, [24, 14, 20, 26]), False)
+
     match = _INTERIOR_MUX_RE.match(signal)
     if not match:
         return None
@@ -441,8 +455,6 @@ def interior_mux_to_bitstream(rbb_x, rbb_row, signal):
     if idx is None:
         return None
 
-    ri = (rbb_row - 2) // 2
-    x = rbb_x + 1
     inverted = (sel == "BSEL")
 
     if mux_name in _INTERIOR_MUX_5_BASES:
