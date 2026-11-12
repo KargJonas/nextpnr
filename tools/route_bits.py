@@ -98,9 +98,18 @@ def pool_inputs(g, routing):
             if not (N_SM <= dst < N_GRAPH) or not src < N_SM:
                 continue
             pin = g.nodes[dst]
-            if pin.pin >= 24 or pin.pin % 6 >= 4:
+            if pin.pin >= 24 or pin.pin % 6 == 4:
                 continue
             site = pin.site
+            if pin.pin % 6 == 5:
+                # I5 of the four slices share four feeders, and MUX_CE / MUX_SR
+                # select among them by the feeder's branch (A-D = D0B0-D0B3: all
+                # of 7,400 routed enables and resets of the vendor's builds).
+                # Reported as pin 100 + pin, apart from the LUT inputs.
+                sx, sy = (int(v) for v in re.match(r"(\d+),(\d+)", site).groups())
+                if re.match(r"\d+,\d+L0", site):
+                    out.append([sx, sy, 100 + pin.pin, g.nodes[src].branch])
+                continue
             fanin = [f for n in by_site_pin[(site, pin.pin - pin.pin % 6)]
                      for f, _w in g.radj.get(n, [])]
             if len(fanin) == 1:

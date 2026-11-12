@@ -435,6 +435,18 @@ def interior_mux_to_bitstream(rbb_x, rbb_row, signal):
     ri = (rbb_row - 2) // 2
     x = rbb_x + 1
 
+    sync = re.fullmatch(r"([ABCD])QsyncSRen", signal)
+    if sync:
+        # Whether a slice's flip-flop takes the block's set/reset (on the
+        # clock). The vendor names it in its simulation netlist only (*.vm),
+        # not among its settings; the bit follows the name in every block of
+        # 200 builds. Left at 0, a routed reset did nothing on silicon.
+        sl = "ABCD".index(sync.group(1))
+        pos, lanes = ((_INTERIOR_MUX_POS_OTHER, [27, 1, 23, 29]) if sl % 2 == 0
+                      else (_INTERIOR_MUX_POS_5, [6, 12, 18, 24]))
+        return (xyp_to_word(rbb_x + (0 if sl < 2 else 2), 0, pos[ri]),
+                _interior_mux_row_bit(ri, lanes), False)
+
     if signal == "MUX_CE/CIN":
         # What MUX_CE's fifth input (ESEL) is: 1, the clock enable of the
         # block below in the column (the vendor's CEin chain); 0, a constant.

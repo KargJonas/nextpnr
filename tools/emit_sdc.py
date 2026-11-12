@@ -673,8 +673,6 @@ def resolve_shared_ff_control(ffs, prefix, pin_key, net_key, default_pin, mux_na
         return 1
 
     pin = pins[0] if pins else default_pin
-    if mux_name == "MUX_CE" and pin >= 16:
-        warn(f"{prefix}: {mux_name} selects pin {pin}; ESEL coverage is still sparse on this architecture")
     return pin
 
 
@@ -993,11 +991,41 @@ def emit_sdc(placement, out_file):
                 )
                 ce_nets = {ff.get('ce_net', '') for ff in ff_slices.values() if ff.get('ce_net')}
                 ce_xor = 1 if ce_nets == {'$PACKER_VCC'} else 0
-                emit_mux_sel_with_xor(f, prefix, "MUX_CE", ce_pin, ce_xor, 5)
+                # A routed enable or reset comes in by one of four feeders, and
+                # the mux selects it one-hot (route_bits.py, pool_inputs).
+                control = placement.get('control_lands', {})
+                site = next(((ff['sx'], ff['sy']) for ff in ff_slices.values()), (None, None))
+                ce_way = control.get((*site, ce_pin)) if ce_nets - {'$PACKER_VCC'} else None
+                sr_nets = {ff.get('sr_net', '') for ff in ff_slices.values() if ff.get('sr_net')}
+                sr_way = control.get((*site, sr_pin)) if sr_nets - {'$PACKER_GND'} else None
+                ce_flip = int(any(ff.get('ce_inverted', 0) for ff in ff_slices.values()
+                                  if ff.get('ce_net') not in (None, '', '$PACKER_VCC')))
+                if ce_nets - {'$PACKER_VCC'} and ce_way is None:
+                    raise UnsupportedBackendFeature(f"{prefix}: the enable {sorted(ce_nets)} is not routed to the site")
+                if sr_nets - {'$PACKER_GND'} and sr_way is None:
+                    raise UnsupportedBackendFeature(f"{prefix}: the reset {sorted(sr_nets)} is not routed to the site")
+                emit_mux_sel_with_xor(f, prefix, "MUX_CE", 16 if ce_way is None else 1 << ce_way,
+                                      # XOR 1: the enable as it comes (on silicon); 0 where
+                                      # a LUT drives it, which arrives complemented (hb_emit.py)
+                                      1 ^ ce_flip if ce_way is not None else ce_xor, 5)
                 # A constant clock enable is the fifth input with the chain
                 # from the block below switched off (pack.py, MUX_CE/CIN).
-                f.write(f"set_case_analysis {0 if ce_pin == 16 else 1} {prefix}/MUX_CE/CIN\n")
-                emit_mux_sel_with_xor(f, prefix, "MUX_SR", sr_pin, sr_xor, 5)
+                f.write(f"set_case_analysis {0 if ce_way is None else 1} {prefix}/MUX_CE/CIN\n")
+                # MUX_SR's XOR is the reset's polarity alone: 0 takes it as it
+                # comes. It clears: what makes a flip-flop set instead is not known.
+                inverted = any(ff.get('is_r_inverted', 0) for ff in ff_slices.values())
+                inverted ^= any(ff.get('sr_inverted', 0) for ff in ff_slices.values()
+                                if ff.get('sr_net') not in (None, '', '$PACKER_GND'))
+                emit_mux_sel_with_xor(f, prefix, "MUX_SR", sr_pin if sr_way is None else 1 << sr_way,
+                                      int(inverted) if sr_way is not None else sr_xor, 5)
+                # A flip-flop takes a routed set/reset only where its slice says so.
+                for sl, ff in ff_slices.items():
+                    if ff.get('sr_net') not in (None, '', '$PACKER_GND'):
+                        if (ff.get('ff_type') or 'FDRE') != 'FDRE':
+                            raise UnsupportedBackendFeature(
+                                f"{prefix}: {ff.get('ff_type')} with a routed set, clear or preset: only the "
+                                "synchronous reset is known to work (flow.sh has Yosys build the others from it)")
+                        f.write(f"set_case_analysis 1 {prefix}/{SLICE_LETTER[sl]}QsyncSRen\n")
 
             # --- BC bits (LUT INIT / RAM INIT) ---
             if sitewide_ram is not None:
@@ -1188,7 +1216,8 @@ def land_on_lut_inputs(placement, routed):
     pool pin nextpnr names. `routed` = [[sx, sy, pin, lut_input]]; a pin is
     rewritten to the pool pin of that input, which assign_pins maps 1:1.
     """
-    lands = {(sx, sy, pin): pin - pin % 6 + k for sx, sy, pin, k in routed}
+    lands = {(sx, sy, pin): pin - pin % 6 + k for sx, sy, pin, k in routed if pin < 100}
+    placement['control_lands'] = {(sx, sy, pin - 100): k for sx, sy, pin, k in routed if pin >= 100}
     for cell in placement['luts'] + placement.get('rams', []):
         cell['pins'] = [lands.get((cell['sx'], cell['sy'], p), p) if p >= 0 else p
                         for p in cell['pins']]
