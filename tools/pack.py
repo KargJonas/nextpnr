@@ -366,10 +366,10 @@ def row_formula_to_bitstream(formula, rbb_x):
 # ---------------------------------------------------------------------------
 # Formulaic interior CLB mux encoding
 # ---------------------------------------------------------------------------
-# The row-formula DB is deliberately conservative and still has sparse holes in
-# the last CLB rows for MUX_x5 / MUX_x6 / MUX_xI / MUX_CE selectors. The
-# underlying encoding is regular enough to use as a fallback when neither the
-# per-instance DB nor row_formulas.json covers a signal.
+# The interior CLB mux selectors (MUX_x5 / MUX_x6 / MUX_xI / MUX_CE / MUX_SR
+# at the even columns 2-28) follow one regular encoding, which holds for every
+# one of them in all 816 vendor builds of the corpus (row_formulas.json has no
+# entries for them: see device/PROVENANCE.md).
 
 _INTERIOR_MUX_SEL4 = {
     "ASEL": 0,
@@ -385,6 +385,7 @@ _INTERIOR_MUX_SEL6 = {
 }
 
 _INTERIOR_MUX_POS_5 = [10, 9, 8, 7, 7, 6, 5, 5, 4, 3, 3, 2, 1, 1]
+_INTERIOR_MUX_POS_6 = [9, 9, 8, 7, 7, 6, 5, 5, 4, 3, 3, 2, 1, 0]
 _INTERIOR_MUX_POS_OTHER = [9, 9, 8, 7, 7, 6, 5, 5, 4, 3, 3, 2, 1, 1]
 
 _INTERIOR_MUX_5_BASES = {
@@ -398,8 +399,11 @@ _INTERIOR_MUX_6_BASES = {
     "MUX_A6": (0, 4),
     "MUX_B6": (4, 8),
     "MUX_C6": (8, 12),
-    "MUX_D6": (8, 12),
 }
+
+# MUX_D6 is the odd one out: it sits in the MUX_x5 bit lane and pos table, at
+# Y 16 (odd column index) or 12 (even), not 16 above its lower base.
+_INTERIOR_MUX_D6_Y = (12, 16)
 
 _INTERIOR_MUX_CONST_Y = {
     "MUX_AI": 18,
@@ -413,27 +417,6 @@ _INTERIOR_MUX_CONST_Y = {
 _INTERIOR_MUX_RE = re.compile(
     r'^(MUX_[ABCD][56]|MUX_[ABCD]I|MUX_CE|MUX_SR)/(ASEL|BSEL|CSEL|DSEL|ESEL|XOR)$'
 )
-
-# BRAM-adjacent interior mux selectors mostly follow the generic formulas once
-# the row-local slot is corrected. The vendor FIFO BRAM references show two
-# recovered cases:
-#   - row 24 / 26 prefer the generic interior formula over the older row-formula
-#     aliases for a small set of signals.
-#   - row 28 keeps the generic X/Y lane and bit index but moves a subset of
-#     MUX_6 selectors from pos 1 to pos 0.
-_BRAM_INTERIOR_POS0_SIGNALS = {
-    (4, 28): {"MUX_A6/CSEL", "MUX_B6/CSEL", "MUX_C6/CSEL", "MUX_D6/CSEL"},
-    (10, 28): {"MUX_A6/CSEL", "MUX_B6/CSEL", "MUX_C6/CSEL", "MUX_D6/CSEL"},
-    (13, 28): {"MUX_A6/CSEL", "MUX_B6/CSEL", "MUX_C6/CSEL", "MUX_D6/CSEL"},
-    (16, 28): {"MUX_A6/ASEL", "MUX_B6/ASEL"},
-}
-
-_BRAM_SKIP_ROW_FORMULA_SIGNALS = {
-    (4, 24): {"MUX_C6/ASEL", "MUX_C6/BSEL"},
-    (10, 24): {"MUX_C6/ASEL", "MUX_C6/BSEL"},
-    (13, 26): {"MUX_C5/ASEL"},
-}
-
 
 def _interior_mux_row_bit(ri, base_by_sub):
     """Shared row-index to bit-position mapping for interior CLB muxes."""
@@ -476,13 +459,19 @@ def interior_mux_to_bitstream(rbb_x, rbb_row, signal):
         sel_offset = _INTERIOR_MUX_SEL4.get(sel)
         if sel_offset is None:
             return None
-        pos = _INTERIOR_MUX_POS_OTHER[ri]
-        bram_pos0_signals = _BRAM_INTERIOR_POS0_SIGNALS.get((rbb_x, rbb_row))
-        if bram_pos0_signals is not None and signal in bram_pos0_signals:
-            pos = 0
+        pos = _INTERIOR_MUX_POS_6[ri]
         bit = _interior_mux_row_bit(ri, [26, 0, 22, 28])
         y_lower, y_upper = _INTERIOR_MUX_6_BASES[mux_name]
         y = (y_upper + 16 if (idx % 2) == 0 else y_lower) + sel_offset
+        return xyp_to_word(x, y, pos), bit, inverted
+
+    if mux_name == "MUX_D6":
+        sel_offset = _INTERIOR_MUX_SEL4.get(sel)
+        if sel_offset is None:
+            return None
+        pos = _INTERIOR_MUX_POS_5[ri]
+        bit = _interior_mux_row_bit(ri, [7, 13, 19, 25])
+        y = _INTERIOR_MUX_D6_Y[idx % 2] + sel_offset
         return xyp_to_word(x, y, pos), bit, inverted
 
     sel_offset = _INTERIOR_MUX_SEL6[sel]
@@ -1402,11 +1391,7 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
         # at all confidence levels).  Skip edge columns; different encoding.
         if rbb_match and row_formulas:
             if rbb_x not in (0, 31):
-                formula = None
-                bram_skip_signals = _BRAM_SKIP_ROW_FORMULA_SIGNALS.get((rbb_x, rbb_row))
-                if bram_skip_signals is None or signal not in bram_skip_signals:
-                    formula_key = f"{rbb_row}:{signal}"
-                    formula = row_formulas.get(formula_key)
+                formula = row_formulas.get(f"{rbb_row}:{signal}")
                 if formula:
                     result = row_formula_to_bitstream(formula, rbb_x)
                     if result:
