@@ -416,7 +416,8 @@ def remap_lut(init, pins):
 def permute_init(init, perm):
     """Permute a 64-bit LUT INIT truth table.
 
-    perm[i] = j means physical address bit i gets its value from logical bit j.
+    perm[i] = j means physical address bit i gets its value from logical bit j;
+    a tuple of them, that one net sits on all those logical inputs.
     If perm[i] = -1, that address bit is tied to 0.
 
     For a LUT6: O = INIT[{A6, A5, A4, A3, A2, A1}]
@@ -427,8 +428,10 @@ def permute_init(init, perm):
         # Map physical address to logical address.
         log_addr = 0
         for bit in range(6):
-            if perm[bit] >= 0 and (addr >> bit) & 1:
-                log_addr |= (1 << perm[bit])
+            if (addr >> bit) & 1:
+                for logical in (perm[bit] if isinstance(perm[bit], tuple) else (perm[bit],)):
+                    if logical >= 0:
+                        log_addr |= (1 << logical)
         if (init >> log_addr) & 1:
             new_init |= (1 << addr)
     return new_init
@@ -476,8 +479,11 @@ def assign_pins(sl, pins):
     perm = [-1] * 6
 
     # Map dedicated signals.
+    # A net on several inputs of the LUT lands on one physical input
+    # (land_on_lut_inputs), which then stands for all of them.
     for log_k, pin, ded_slot in on_dedicated:
-        perm[ded_slot] = log_k
+        perm[ded_slot] = log_k if perm[ded_slot] == -1 else \
+            (perm[ded_slot] if isinstance(perm[ded_slot], tuple) else (perm[ded_slot],)) + (log_k,)
 
     # Map non-dedicated signals to A5 (bit 4) and A6 (bit 5).
     mux5_pin = -1
