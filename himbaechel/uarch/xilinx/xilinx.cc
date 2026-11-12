@@ -172,12 +172,15 @@ void XilinxImpl::init_database(Arch *arch)
         graded |= IdString(grade.name).str(arch) == speed;
         grades += (grades.empty() ? "" : ", ") + IdString(grade.name).str(arch);
     }
-    if (grades == "DEFAULT")
+    const bool chipdb_has_only_default_grade = grades == "DEFAULT";
+    const bool part_names_no_grade = speed.empty();
+    const bool grade_is_not_in_chipdb = !graded;
+    if (chipdb_has_only_default_grade)
         speed = grades;
-    else if (speed.empty())
+    else if (part_names_no_grade)
         log_error("The chipdb is timed per speed grade (%s): name the part with its grade, as %s-1.\n",
                   grades.c_str(), args.device.c_str());
-    else if (!graded)
+    else if (grade_is_not_in_chipdb)
         log_error("Speed grade %s is not in the chipdb, which has %s.\n", speed.c_str(), grades.c_str());
     arch->set_speed_grade(speed);
 }
