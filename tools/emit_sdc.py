@@ -761,16 +761,7 @@ def emit_sdc(placement, out_file):
         # constant-output emission.
         def _is_constant_driver_lut(lut):
             name = lut.get('name', '')
-            if name in ('$PACKER_VCC_DRV', '$PACKER_GND_DRV'):
-                return True
-            # Defensive: also drop any zero-input LUT whose INIT is all-0 or
-            # all-1 — same shape, slightly different name across nextpnr
-            # versions.
-            pins = lut.get('pins', [])
-            nused = sum(1 for p in pins if p != -1)
-            if nused == 0 and lut.get('init', 0) in (0, (1 << 64) - 1):
-                return True
-            return False
+            return name in ('$PACKER_VCC_DRV', '$PACKER_GND_DRV')
 
         for lut in placement['luts']:
             if _is_constant_driver_lut(lut):

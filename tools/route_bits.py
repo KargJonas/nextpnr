@@ -168,8 +168,12 @@ def main():
             nets[i] = hops
 
     virtual = {i: name for i, name in routing["pad_nodes"]}
+    # LUT inputs whose polarity the caller has settled in the LUT's table
+    compensated = set(routing.get("compensated", [])) | set(routing.get("checked", []))
     bad = False
     for net, sink, k in inverting_paths(g, routing, virtual):
+        if sink in compensated:
+            continue
         kind = sink.rsplit("/", 1)[-1]
         print(f"route_bits: {net} -> {sink} crosses {k} inverting level-13-up hop(s)"
               + ("" if kind == "PAD" else " -- the LUT would see its input inverted"),
