@@ -65,6 +65,13 @@ static void wire_xy(Context *ctx, WireId w, int &x, int &y)
     y = (bb.y0 + bb.y1) / 2;
 }
 
+// The delay of one routing step, as timing analysis counts it: the pip and
+// the wire it drives.
+static delay_t step_delay(Context *ctx, PipId pip)
+{
+    return ctx->getPipDelay(pip).maxDelay() + ctx->getWireDelay(ctx->getPipDstWire(pip)).maxDelay();
+}
+
 // Lengthen the routing to ONE sink of `net` by at least `extra_delay`, adding no
 // cell: rip that sink's private branch and re-bind it along a more circuitous
 // path.  Best-effort and side-effect-free on failure -- if it cannot reach the
@@ -100,7 +107,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
         PipId pip = it->second.pip;
         priv.push_back(cur);
         priv_pips.push_back(pip);
-        branch_delay += ctx->getPipDelay(pip).maxDelay();
+        branch_delay += step_delay(ctx, pip);
         WireId parent = ctx->getPipSrcWire(pip);
         bool parent_is_branch_point = child_count.at(parent) > 1;
         if (parent_is_branch_point) {
@@ -161,7 +168,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
             bool candidate_wire = usable(s) && in_box(s) && ctx->checkPipAvailForNet(up, net);
             if (!candidate_wire)
                 continue;
-            delay_t nd = e.d + ctx->getPipDelay(up).maxDelay();
+            delay_t nd = e.d + step_delay(ctx, up);
             auto it = distT.find(s);
             bool shorter_path_to_sink = it == distT.end() || nd < it->second;
             if (shorter_path_to_sink) {
@@ -207,7 +214,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
             bool can_extend_path = !used.count(n) && distT.count(n) && usable(n) && ctx->checkPipAvailForNet(dh, net);
             if (!can_extend_path)
                 continue;
-            delay_t total = acc + ctx->getPipDelay(dh).maxDelay() + distT.at(n);
+            delay_t total = acc + step_delay(ctx, dh) + distT.at(n);
             // Prefer the largest total not exceeding target; penalise overshoot.
             delay_t score = (total <= target) ? total : (2 * target - total);
             if (score > best_score) {
@@ -219,7 +226,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
         if (best == PipId())
             break; // dead end -- fall through to the shortest tail
         path.push_back(best);
-        acc += ctx->getPipDelay(best).maxDelay();
+        acc += step_delay(ctx, best);
         used.insert(best_w);
         cur = best_w;
     }
@@ -229,7 +236,7 @@ static bool detour_arc(Context *ctx, NetInfo *net, WireId sink_wire, delay_t ext
         if (it == next_pip.end())
             break;
         path.push_back(it->second);
-        acc += ctx->getPipDelay(it->second).maxDelay();
+        acc += step_delay(ctx, it->second);
         cur = ctx->getPipDstWire(it->second);
     }
     bool detour_reached_sink = cur == sink_wire;

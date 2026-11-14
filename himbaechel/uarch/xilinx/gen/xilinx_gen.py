@@ -414,16 +414,16 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         src, dst = pip.src_wire().name(), pip.dst_wire().name()
         if timing_file:
             # A pip the directory has no delay for keeps X-Ray's own
-            xray = lambda: timing_file.pip_class({g: [int(pip.min_delay()*1000), int(pip.max_delay()*1000)] * 2 for g in timing_file.grades})
-            forward = timing_file.tile_pip(tile.tile_type(), src, dst) or xray()
-            backward = timing_file.tile_pip(tile.tile_type(), dst, src) or xray()
+            xray = [int(pip.min_delay()*1000), int(pip.max_delay()*1000)] * 2
+            forward = timing_file.tile_pip(tile.tile_type(), src, dst, xray)
+            backward = timing_file.tile_pip(tile.tile_type(), dst, src, xray) if pip.is_bidi() else forward
         else:
             forward = backward = timing_pip_classs(pip)
             if forward not in seen_pip_timings:
                 ch.timing.set_pip_class(f"DEFAULT", forward,
                     delay=TimingValue(int(pip.min_delay()*1000), int(pip.max_delay()*1000)), # ps
-                    in_cap=TimingValue(int(pip.capacitance()*1000)), # fF
-                    out_res=TimingValue(int(pip.resistance())), # mohm
+                    in_cap=TimingValue(int(pip.capacitance()*1000)), # aF
+                    out_res=TimingValue(int(pip.resistance())), # ohms
                     is_buffered=pip.is_buffered())
                 seen_pip_timings.add(forward)
         rt = PIP_CFG_ROUTETHRU if pip.is_route_thru() else 0
@@ -757,6 +757,8 @@ def main():
           file=sys.stderr)
     for t, c in sorted(nobits_by_tiletype.items(), key=lambda kv: -kv[1])[:10]:
         print("    no bits: %-28s %6d pips" % (t, c), file=sys.stderr)
+    if timing_file:
+        timing_file.report(sys.stderr)
     ch.write_bba(args.bba)
 
 if __name__ == '__main__':

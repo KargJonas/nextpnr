@@ -50,6 +50,10 @@ WRITE_MODES = ("NC", "RF", "WF")
 
 EDGES = {"posedge": ClockEdge.RISING, "negedge": ClockEdge.FALLING}
 
+# A site pip's delay without --timing (the generator's SITE_NULL), in ps: a
+# site arc the directory lacks keeps it.
+STUB = 20
+
 
 def value(quad):
     """A TimingValue of exactly these four (its constructor takes 0 as unset)."""
@@ -108,6 +112,7 @@ class TimingDir:
         timing.set_speed_grades(self.grades)
         self.named = {}  # delays by grade -> pip class name
         self.nodes = set()
+        self.missing = defaultdict(set)  # kind -> what the directory lacks, timed as without it
 
     def timed(self, delays):
         """These delays, where every grade has one."""
@@ -128,14 +133,25 @@ class TimingDir:
     def zero(self):
         return self.pip_class({g: [0, 0, 0, 0] for g in self.grades})
 
-    def tile_pip(self, tile_type, src, dst):
-        """A tile pip's class, or None where no grade times it."""
+    def stub(self, what):
+        """The stub site pip's class, for a site arc the directory lacks."""
+        self.missing["site arcs"].add(what)
+        return self.pip_class({g: [STUB] * 4 for g in self.grades})
+
+    def tile_pip(self, tile_type, src, dst, fallback):
+        """A tile pip's class; where no grade times it, the quad `fallback`
+        (X-Ray's delays) in every grade."""
         delays = self.timed(self.pips[tile_type].get((src, dst)))
-        return self.pip_class(delays, self.in_cap[tile_type][(src, dst)]) if delays else None
+        if delays:
+            return self.pip_class(delays, self.in_cap[tile_type][(src, dst)])
+        self.missing["tile pips"].add((tile_type, src, dst))
+        return self.pip_class({g: fallback for g in self.grades})
 
     def node_class(self, wires):
         """The node class of (tile type, wire)s: their delays and res summed."""
         timed = [(tt, w) for tt, w in wires if self.timed(self.wires[tt].get(w))]
+        # X-Ray has no wire delay to keep: an untimed wire adds none
+        self.missing["wires"].update(w for w in wires if w not in timed)
         if not timed:
             return ""
         total = {g: [sum(self.wires[tt][w][g][i] for tt, w in timed) for i in range(4)] for g in self.grades}
@@ -150,6 +166,16 @@ class TimingDir:
 
     def site(self, sv):
         return Site(self, sv)
+
+    def report(self, file):
+        """How much the directory lacked, and so was timed as without it."""
+        for kind, what in sorted(self.missing.items()):
+            print(f"timing: {len(what)} {kind} not in the timing directory", file=file)
+            by_type = defaultdict(int)
+            for w in what:
+                by_type[w[0]] += 1
+            for t, n in sorted(by_type.items(), key=lambda kv: -kv[1])[:5]:
+                print(f"    {t:<28} {n:6}", file=file)
 
     def arcs(self, cell, entries, clocks=lambda pin, clock: clock, clocked=True):
         """Add these SDF entries' arcs on the rising edge to `cell`, each
@@ -231,7 +257,12 @@ class Site:
             if bel.bel_class() != "BEL":
                 continue
             for pin in bel.pins():
-                (self.outs if pin.dir() == "OUTPUT" else self.ins)[pin.site_wire().name()].append(f"{self.st}/{bel.name()}/{pin.name}")
+                # A BIDIR pin is a way both in and out (as the generator's site pins are)
+                name = f"{self.st}/{bel.name()}/{pin.name}"
+                if pin.dir() in ("OUTPUT", "BIDIR"):
+                    self.outs[pin.site_wire().name()].append(name)
+                if pin.dir() != "OUTPUT":
+                    self.ins[pin.site_wire().name()].append(name)
 
     def least(self, names):
         """The delays of the least (slow max) of these terms in each grade, or None."""
@@ -246,26 +277,32 @@ class Site:
     def way_out(self, wire):
         return self.least(f"out:{p}" for p in self.outs[wire])
 
-    def named(self, delays):
-        return self.t.pip_class(delays) if delays else self.t.zero()
+    def named(self, delays, arc=None):
+        """These delays' class. Where they are missing for `arc`, a way to or
+        from bel pins, the stub's; with no bel pins on the way, none."""
+        if delays:
+            return self.t.pip_class(delays)
+        if arc:
+            return self.t.stub((self.st, arc))
+        return self.t.zero()
 
     def entrance(self, wire):
-        return self.named(self.way_in(wire))
+        return self.named(self.way_in(wire), f"into {wire}" if self.ins[wire] else None)
 
     def exit(self, wire):
-        return self.named(self.way_out(wire))
+        return self.named(self.way_out(wire), f"out of {wire}" if self.outs[wire] else None)
 
     def internal(self, src, dst):
         if self.outs[src] and self.ins[dst]:
-            return self.named(self.least(f"inside:{d}>{s}" for d in self.outs[src] for s in self.ins[dst]))
+            return self.named(self.least(f"inside:{d}>{s}" for d in self.outs[src] for s in self.ins[dst]), f"{src} to {dst}")
         if self.ins[dst]:
             # The rest of the way from a site pin: its entrance has the
             # way into the bel pins on its own wire.
             into, before = self.way_in(dst), self.way_in(src)
             if into and before:
                 into = {g: [max(0, a - b) for a, b in zip(into[g], before[g])] for g in self.t.grades}
-            return self.named(into)
-        return self.named(self.way_out(src))
+            return self.named(into, f"into {dst}")
+        return self.exit(src)
 
     def route_through(self, lut, i):
         """LUT `lut`'s input `i` (`A`, 3) to its 6-LUT's output, out of the
@@ -277,5 +314,5 @@ class Site:
                 if isinstance(e, parse_sdf.IOPath) and e.from_pin == f"A{i}" and e.to_pin == "O6":
                     arcs[g] = corners(e)
         if None in parts or not self.t.timed(arcs):
-            return self.t.zero()
+            return self.t.stub((self.st, f"{lut}{i} through {lut}6LUT"))
         return self.t.pip_class({g: [parts[0][g][k] + parts[1][g][k] + arcs[g][k] for k in range(4)] for g in self.t.grades})

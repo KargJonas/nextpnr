@@ -215,9 +215,10 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   - Cell timing: `CellTimingPOD`/`CellPinTimingPOD` with comb arcs and reg arcs
     (setup/hold/clk_q) — LUT/FF stubbed in `xilinx_gen.py:450-462`; SELMUX2_1, CARRY4 and
     BRAM imported from prjxray SDF (`xilinx_gen.py:464-474`).
-- **Only one speed grade exists**: `set_speed_grades(["DEFAULT"])`
-  (`xilinx_gen.py:387`, TODO) and `init_database` calls `set_speed_grade("DEFAULT")`
-  (`xilinx.cc:91`). Real -1/-2/-3 grades are not modelled.
+- **Speed grades**: with X-Ray's delays alone there is one, `DEFAULT`, for every part.
+  With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
+  `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
+  `3`), and `init_database` picks the part's from its suffix (`xc7a100tcsg324-1`).
 - **Runtime lookups**: `Arch::get_cell_timing_idx`, `lookup_cell_delay`,
   `lookup_cell_seq_timings`, `lookup_port_tmg_type` (`arch.cc:470-520`) feed the shared
   timing engine through `getCellDelay`/`getPortTimingClass`/`getPortClockingInfo`

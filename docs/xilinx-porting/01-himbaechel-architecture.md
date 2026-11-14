@@ -232,6 +232,8 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
   `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
   `3`), and `init_database` picks the part's from its suffix (`xc7a100tcsg324-1`).
+  What the directory lacks is timed as without it (a tile pip with X-Ray's delay, a site
+  arc with the 20 ps stub, a wire with none), and the generator reports how much that is.
 - **Runtime lookups**: `Arch::get_cell_timing_idx`, `lookup_cell_delay`,
   `lookup_cell_seq_timings`, `lookup_port_tmg_type` (`arch.cc:470-520`) feed the shared
   timing engine through `getCellDelay`/`getPortTimingClass`/`getPortClockingInfo`
