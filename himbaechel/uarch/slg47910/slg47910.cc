@@ -1,24 +1,31 @@
 /*
  * nextpnr-himbaechel uarch for the Renesas SLG47910 (ForgeFPGA).
  *
- * The chipdb (slg47910_gen.py) is the vendor's routing graph with the 140 L0
- * logic sites (four slices of a LUT6 and the flip-flop on its output), the
- * 184 L6 pads and the three dedicated clock inputs as bels. This file is what
+ * The chipdb (slg47910_gen.py) is the vendor's routing graph with the 100 L0
+ * logic sites that have no memory view (four slices of a LUT6, two flip-flops
+ * and a bit of the carry chain), the 184 L6 pads and the three dedicated
+ * clock inputs as bels. This file is what
  * nextpnr does with it:
  *
  *   pack       pads and clock inputs from the ports and a pin file, the
  *              synthesiser's LUTs and flip-flops as SLG_LUT and SLG_FF, a LUT
- *              with its single flip-flop as one cluster, constants as LUTs
- *   validity   the flip-flops of a site share one enable and one reset
+ *              with its single flip-flop as one cluster, constants as LUTs,
+ *              CARRY4 chains as one cluster of carry bits up a column, a
+ *              MUXF7 or a MUXF8 as one cluster with the LUTs it takes,
+ *              two LUTs of five inputs in all as one slice's two halves
+ *   validity   the flip-flops of a site share one enable and one reset; a
+ *              site's four I5 pins bring in at most four nets; at most two
+ *              slices of a site in use but where a carry chain fills it
  *   postRoute  what the bitstream tools take: where every cell sits and what
  *              each net's route is, as JSON (placement.json, routing.json),
  *              in the names of the chipdb, which the bitstream tools
  *              (hb_emit.py) turn into the graph's node ids and the sites'
  *              coordinates
  *
- * Not yet: the carry chain, the memory sites and the second flip-flop of a slice.
+ * Not yet: the memory sites.
  */
 
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <set>
@@ -29,6 +36,7 @@
 #include "himbaechel_helpers.h"
 #include "log.h"
 #include "nextpnr.h"
+#include "placer_heap.h"
 #include "util.h"
 
 #define GEN_INIT_CONSTIDS
@@ -42,6 +50,12 @@ namespace {
 
 constexpr int GRID = 32;
 constexpr int FF_Z = 4;      // a slice's flip-flop sits 4 above its LUT
+constexpr int CARRY_Z = 8;   // and its bit of the carry chain 8 above
+constexpr int OFF_Z = 12;    // and its second flip-flop (OXQ) 12 above
+constexpr int MUXF_Z = 16;   // the site's F7A, F7C and F8 (gen)
+constexpr int LUTL_Z = 20;   // a slice's lower half, a LUT of its own
+// The slice whose XI selects each wide mux, and whose xMUX pin it leaves by.
+constexpr int MUXF_SLICE[3] = {0, 2, 1};
 constexpr int CLKIN_Z = 100; // W0, N0, N1
 
 // The package's pads: GPIO name -> the vendor's name for its IOB, RBB_<row>_<col>.
@@ -90,6 +104,8 @@ struct SlgImpl : HimbaechelAPI
         po::options_description specific("SLG47910 specific options");
         specific.add_options()("pins", po::value<std::string>(),
                                "pin file: `set_io <port> GPIO<n>|<row> <col>`, `set_clk <port> W0|N0|N1`");
+        specific.add_options()("speed", po::value<std::string>(),
+                               "the speed grade, a condition the vendor times under (its builds' when not given)");
         specific.add_options()("slices", po::value<int>()->default_value(2),
                                "slices (LUT and flip-flop pairs) a placer may use in one site");
         specific.add_options()("placement", po::value<std::string>(), "where to write the placement, as JSON");
@@ -101,7 +117,11 @@ struct SlgImpl : HimbaechelAPI
     {
         init_uarch_constids(arch);
         arch->load_chipdb("slg47910/chipdb-slg47910.bin");
-        arch->set_speed_grade("DEFAULT");
+        // The speed grades are the vendor's conditions, the one its builds are
+        // timed under first: the default (gen/slg47910_gen.py).
+        std::string speed = arch->args.options.count("speed") ? arch->args.options.at("speed").as<std::string>()
+                                                             : IdString(arch->chip_info->speed_grades[0].name).str(arch);
+        arch->set_speed_grade(speed);
     }
 
     void init(Context *ctx) override
@@ -109,9 +129,34 @@ struct SlgImpl : HimbaechelAPI
         h.init(ctx);
         HimbaechelAPI::init(ctx);
         slices = ctx->args.options.count("slices") ? ctx->args.options.at("slices").as<int>() : 2;
+        // The site each site's carry out goes on to: the far end of its CARRY pip.
+        for (BelId bel : ctx->getBels()) {
+            if (ctx->getBelType(bel) != id_SLG_CARRY || ctx->getBelLocation(bel).z != CARRY_Z + 3)
+                continue;
+            Loc at = ctx->getBelLocation(bel);
+            for (PipId pip : ctx->getPipsDownhill(ctx->getBelPinWire(bel, id_CO)))
+                if (IdString(chip_pip_info(ctx->chip_info, pip).type) == id_CARRY) {
+                    Loc up = ctx->getPipLocation(pip);
+                    site_above[{at.x, at.y}] = {up.x, up.y};
+                }
+        }
+        std::set<std::pair<int, int>> above;
+        for (auto &[below, up] : site_above)
+            above.insert(up);
+        for (auto &[below, up] : site_above)
+            if (!above.count(below))
+                column_foot = below;
     }
 
     std::string getDefaultRouter() const override { return "router2"; }
+
+    // Every cell type at once, so a carry chain (the largest cluster) is
+    // legalised before the LUTs and flip-flops fill the column it needs.
+    void configurePlacerHeap(PlacerHeapCfg &cfg) override
+    {
+        cfg.placeAllAtOnce = true;
+        cfg.chainRipup = true;
+    }
 
     // Site pins sit away from their site and legal routes detour through
     // neighbouring switch boxes: nothing is outside a net's box.
@@ -353,9 +398,10 @@ struct SlgImpl : HimbaechelAPI
             ctx->cells[cell->name] = std::move(cell);
     }
 
-    // A flip-flop takes D from the LUT of its slice, by the dedicated path: it
-    // goes in its LUT's cluster, and where no LUT of its own drives it (another
-    // flip-flop, a constant, a net several flip-flops take) a buffer LUT is its own.
+    // A flip-flop driven by a LUT goes in its LUT's cluster and takes D by the
+    // dedicated path. One whose D is any other net (another flip-flop, a net a
+    // clustered LUT drives) takes it from the fabric (XI); a constant D, which
+    // is not routed, gets a LUT of its own that holds it.
     void pair_ffs()
     {
         std::vector<std::unique_ptr<CellInfo>> made;
@@ -366,7 +412,11 @@ struct SlgImpl : HimbaechelAPI
             if (d == nullptr)
                 continue;
             CellInfo *lut = d->driver.cell;
-            if (lut == nullptr || lut->type != id_SLG_LUT || d->driver.port != id_O || lut->cluster != ClusterId()) {
+            bool constant = lut != nullptr && lut->type.in(ctx->id("VCC"), ctx->id("GND"));
+            if (!constant && (lut == nullptr || lut->type != id_SLG_LUT || d->driver.port != id_O ||
+                              lut->cluster != ClusterId()))
+                continue;
+            if (constant) {
                 auto buf = std::make_unique<CellInfo>(ctx, ctx->idf("%s$buf", name.c_str(ctx)), id_SLG_LUT);
                 buf->params[id_INIT] = Property(0x2ull, 64);
                 buf->params[id_LUT_MODE] = Property("LUT5");
@@ -390,15 +440,323 @@ struct SlgImpl : HimbaechelAPI
         }
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
-        log_info("slg47910: flip-flops share a slice with their LUT, %zu with a buffer of their own\n", made.size());
+        log_info("slg47910: %zu flip-flops hold a constant D in a LUT of their own\n", made.size());
+    }
+
+    // A CARRY4 chain (each one's CO[3] the next one's CI) becomes a bit of the
+    // fabric's chain per slice, SLG_CARRY: P from the LUT that drives S, in its
+    // slice; G on DI (XI, or a constant MUX_xI holds); the carry in from the bit
+    // below, or a constant (CIN_SEL) at the chain's foot; O the sum. A chain is
+    // one cluster rooted at its first bit, with the bits' LUTs and the
+    // flip-flops that take a sum and nothing else, up one column of sites
+    // (getClusterPlacement).
+    void pack_carry()
+    {
+        auto bus = [&](CellInfo *ci, const char *port, int i) { return ci->getPort(ctx->idf("%s[%d]", port, i)); };
+        // 0 or 1 for a constant (no net is 0), -1 for a signal
+        auto constant = [&](const NetInfo *net) {
+            const CellInfo *d = net ? net->driver.cell : nullptr;
+            return net == nullptr || (d && d->type == ctx->id("GND")) ? 0 : d && d->type == ctx->id("VCC") ? 1 : -1;
+        };
+        std::vector<CellInfo *> carry4s;
+        std::map<CellInfo *, CellInfo *> next;
+        std::set<CellInfo *> continued;
+        for (auto &[name, ci] : ctx->cells)
+            if (ci->type == id_CARRY4)
+                carry4s.push_back(ci.get());
+        for (CellInfo *c : carry4s) {
+            const NetInfo *ci = c->getPort(id_CI);
+            if (ci && ci->driver.cell && ci->driver.cell->type == id_CARRY4 && ci->driver.port == ctx->id("CO[3]")) {
+                next[ci->driver.cell] = c;
+                continued.insert(c);
+            }
+        }
+        struct Bit
+        {
+            NetInfo *s, *di, *o, *co;
+        };
+        int chains = 0;
+        for (CellInfo *head : carry4s) {
+            if (continued.count(head))
+                continue;
+            // The carry in: CI | CYINIT of the first.
+            NetInfo *ci = head->getPort(id_CI), *cyinit = head->getPort(id_CYINIT);
+            int ci_const = constant(ci), cyinit_const = constant(cyinit);
+            NetInfo *carry_in = nullptr;
+            if (ci_const == 1 || cyinit_const == 1)
+                ci_const = 1;
+            else if (ci_const == -1 && cyinit_const == -1)
+                log_error("slg47910: %s takes a carry in on CI and on CYINIT\n", head->name.c_str(ctx));
+            else if (ci_const == -1 || cyinit_const == -1)
+                carry_in = ci_const == -1 ? ci : cyinit, ci_const = 0;
+            std::vector<Bit> bits;
+            // A carry in from logic enters as the generate of a bit that propagates nothing.
+            if (carry_in)
+                bits.push_back({nullptr, carry_in, nullptr, nullptr});
+            for (CellInfo *c = head; c; c = next.count(c) ? next.at(c) : nullptr) {
+                for (int i = 0; i < 4; i++)
+                    bits.push_back({bus(c, "S", i), bus(c, "DI", i), bus(c, "O", i), bus(c, "CO", i)});
+                for (auto port : std::vector<IdString>{id_CI, id_CYINIT})
+                    c->disconnectPort(port);
+                for (int i = 0; i < 4; i++)
+                    for (const char *port : {"S", "DI", "O", "CO"})
+                        c->disconnectPort(ctx->idf("%s[%d]", port, i));
+            }
+            // Bits past the last that anything takes are not built.
+            auto used = [](const NetInfo *net) { return net != nullptr && net->users.entries() > 0; };
+            while (!bits.empty() && !used(bits.back().o) && !used(bits.back().co))
+                bits.pop_back();
+            if (bits.empty())
+                continue;
+            if (bits.size() > 40)
+                log_error("slg47910: the carry chain from %s is %zu bits long: a column holds 40\n",
+                          head->name.c_str(ctx), bits.size());
+            chains++;
+            CellInfo *root = nullptr;
+            NetInfo *below = nullptr;
+            std::vector<CellInfo *> luts, ffs;
+            std::vector<const NetInfo *> gs;
+            auto join = [&](CellInfo *cell, int k, int z) {
+                cell->cluster = root->name;
+                cell->constr_abs_z = true;
+                cell->constr_z = z;
+                cell->constr_x = 0;
+                cell->constr_y = k / 4; // the site up the column (getClusterPlacement)
+                if (cell != root)
+                    root->constr_children.push_back(cell);
+            };
+            for (int k = 0; k < int(bits.size()); k++) {
+                Bit &b = bits[k];
+                CellInfo *bit = ctx->createCell(ctx->idf("%s$bit%d", head->name.c_str(ctx), k), id_SLG_CARRY);
+                for (IdString port : {id_P, id_DI, id_CI})
+                    bit->addInput(port);
+                bit->addOutput(id_O);
+                bit->addOutput(id_CO);
+                if (root == nullptr)
+                    root = bit;
+                join(bit, k, CARRY_Z + k % 4);
+                if (k == 0)
+                    bit->params[id_CI_CONST] = Property(ci_const);
+                else
+                    bit->connectPort(id_CI, below);
+                below = b.co ? b.co : k + 1 < int(bits.size()) ? ctx->createNet(ctx->idf("%s$co", bit->name.c_str(ctx))) : nullptr;
+                if (below)
+                    bit->connectPort(id_CO, below);
+                if (b.o)
+                    bit->connectPort(id_O, b.o);
+                if (constant(b.di) >= 0)
+                    bit->params[id_DI_CONST] = Property(constant(b.di));
+                else
+                    bit->connectPort(id_DI, b.di);
+                // P: the LUT that drives S, or one that holds S (a buffer, a
+                // constant). Not one that takes I5: with four routed G a block
+                // has no I5 pin to spare for it.
+                CellInfo *lut = b.s ? b.s->driver.cell : nullptr;
+                if (lut && lut->type == id_SLG_LUT && b.s->driver.port == id_O && lut->cluster == ClusterId() &&
+                    lut->getPort(id_I5) == nullptr)
+                    bit->connectPort(id_P, b.s);
+                else {
+                    lut = ctx->createCell(ctx->idf("%s$p", bit->name.c_str(ctx)), id_SLG_LUT);
+                    int held = constant(b.s);
+                    lut->params[id_INIT] = Property(held == 1 ? 0xFFFFFFFFFFFFFFFFull : held == 0 ? 0ull : 0x2ull, 64);
+                    lut->params[id_LUT_MODE] = Property("LUT5");
+                    lut->addOutput(id_O);
+                    if (held < 0) {
+                        lut->addInput(id_I0);
+                        lut->connectPort(id_I0, b.s);
+                    }
+                    NetInfo *p = ctx->createNet(ctx->idf("%s$p", bit->name.c_str(ctx)));
+                    lut->connectPort(id_O, p);
+                    bit->connectPort(id_P, p);
+                }
+                join(lut, k, k % 4);
+                luts.push_back(lut);
+                ffs.push_back(nullptr);
+                // a flip-flop that takes the sum and is all the sum drives
+                if (b.o && b.o->users.entries() == 1) {
+                    const PortRef &usr = *b.o->users.begin();
+                    if (usr.cell->type == id_SLG_FF && usr.port == id_D && usr.cell->cluster == ClusterId())
+                        ffs.back() = usr.cell;
+                }
+                gs.push_back(bit->getPort(id_DI));
+            }
+            // A site's four I5 pins bring in its bits' G, its LUTs' I5 and its
+            // flip-flops' enable and reset, and its flip-flops share one enable
+            // and one set/reset: a site whose flip-flops would want more leaves
+            // them out, to take the sum by xMUX where they are.
+            for (int k0 = 0; k0 < int(bits.size()); k0 += 4) {
+                std::set<const NetInfo *> nets;
+                for (int k = k0; k < std::min(k0 + 4, int(bits.size())); k++) {
+                    nets.insert(gs[k]);
+                    nets.insert(luts[k]->getPort(id_I5));
+                }
+                std::set<const NetInfo *> with_ffs = nets;
+                // and one enable, one set/reset, acting at once or on the clock
+                std::set<std::tuple<const NetInfo *, const NetInfo *, bool>> controls;
+                for (int k = k0; k < std::min(k0 + 4, int(bits.size())); k++)
+                    if (ffs[k]) {
+                        with_ffs.insert(ffs[k]->getPort(id_CE)), with_ffs.insert(ffs[k]->getPort(id_R));
+                        controls.insert({ffs[k]->getPort(id_CE), ffs[k]->getPort(id_R),
+                                         ff_type_is(ffs[k], "FDCE", "FDPE")});
+                    }
+                with_ffs.erase(nullptr);
+                if (with_ffs.size() > 4 || controls.size() > 1)
+                    continue;
+                for (int k = k0; k < std::min(k0 + 4, int(bits.size())); k++)
+                    if (ffs[k])
+                        join(ffs[k], k, FF_Z + k % 4);
+            }
+        }
+        for (CellInfo *c : carry4s)
+            ctx->cells.erase(c->name);
+        if (chains)
+            log_info("slg47910: %d carry chains\n", chains);
+    }
+
+    // A MUXF8 with the two MUXF7 it takes, or a MUXF7 alone, is one cluster
+    // with the LUTs they take: the site's F7A (A or B, selected by A's XI),
+    // F7C (C or D, by C's XI) and F8 (F7A or F7C, by B's XI) take only their
+    // own slices' LUTs (gen). An input no LUT of its own drives (a LUT taken
+    // by another cluster, a constant) gets a LUT that passes it on.
+    void pack_muxf()
+    {
+        int muxes = 0;
+        auto lut_for = [&](CellInfo *mux, IdString port) {
+            NetInfo *net = mux->getPort(port);
+            CellInfo *lut = net ? net->driver.cell : nullptr;
+            if (lut && lut->type == id_SLG_LUT && net->driver.port == id_O && lut->cluster == ClusterId())
+                return lut;
+            lut = ctx->createCell(ctx->idf("%s$%s", mux->name.c_str(ctx), port.c_str(ctx)), id_SLG_LUT);
+            lut->params[id_INIT] = Property(net ? 0x2ull : 0ull, 64);
+            lut->params[id_LUT_MODE] = Property("LUT5");
+            lut->addOutput(id_O);
+            NetInfo *passed = ctx->createNet(ctx->idf("%s$%s", mux->name.c_str(ctx), port.c_str(ctx)));
+            if (net) {
+                lut->addInput(id_I0);
+                mux->disconnectPort(port);
+                lut->connectPort(id_I0, net);
+            }
+            lut->connectPort(id_O, passed);
+            mux->connectPort(port, passed);
+            return lut;
+        };
+        auto join = [&](CellInfo *root, CellInfo *cell, int z) {
+            cell->cluster = root->name;
+            cell->constr_abs_z = true;
+            cell->constr_z = z;
+            if (cell != root)
+                root->constr_children.push_back(cell);
+        };
+        std::vector<CellInfo *> f7s, f8s;
+        for (auto &[name, ci] : ctx->cells) {
+            if (ci->type.in(id_MUXF7, id_MUXF8)) {
+                const NetInfo *sel = ci->getPort(id_S);
+                if (sel == nullptr || sel->driver.cell == nullptr ||
+                    sel->driver.cell->type.in(ctx->id("VCC"), ctx->id("GND")))
+                    log_error("slg47910: %s (%s) has a constant select\n", name.c_str(ctx), ci->type.c_str(ctx));
+                (ci->type == id_MUXF7 ? f7s : f8s).push_back(ci.get());
+                ci->type = ci->type == id_MUXF7 ? id_SLG_MUXF7 : id_SLG_MUXF8;
+            }
+        }
+        // A MUXF8 takes two MUXF7 that nothing else has taken: F7A on I0, F7C on I1.
+        for (CellInfo *f8 : f8s) {
+            join(f8, f8, MUXF_Z + 2);
+            for (auto [port, z] : {std::pair<IdString, int>{id_I0, 0}, {id_I1, 1}}) {
+                NetInfo *net = f8->getPort(port);
+                CellInfo *f7 = net ? net->driver.cell : nullptr;
+                if (f7 == nullptr || f7->type != id_SLG_MUXF7 || f7->cluster != ClusterId())
+                    log_error("slg47910: %s takes %s from no MUXF7 of its own\n", f8->name.c_str(ctx),
+                              port.c_str(ctx));
+                join(f8, f7, MUXF_Z + z);
+                join(f8, lut_for(f7, id_I0), 2 * z);
+                join(f8, lut_for(f7, id_I1), 2 * z + 1);
+            }
+            muxes++;
+        }
+        // A MUXF7 alone is F7A or F7C: its LUTs' slices follow where it is
+        // placed (getClusterPlacement), the one on I0 below the one on I1.
+        for (CellInfo *f7 : f7s) {
+            if (f7->cluster != ClusterId())
+                continue;
+            f7->cluster = f7->name;
+            f7->constr_abs_z = false;
+            for (auto [port, z] : {std::pair<IdString, int>{id_I0, 0}, {id_I1, 1}}) {
+                CellInfo *lut = lut_for(f7, port);
+                lut->cluster = f7->name;
+                lut->constr_abs_z = false;
+                lut->constr_z = z;
+                f7->constr_children.push_back(lut);
+            }
+            muxes++;
+        }
+        if (muxes)
+            log_info("slg47910: %zu MUXF7, %zu MUXF8\n", f7s.size(), f8s.size());
+    }
+
+    bool getClusterPlacement(ClusterId cluster, BelId root_bel,
+                             std::vector<std::pair<CellInfo *, BelId>> &placement) const override
+    {
+        CellInfo *root = getClusterRootCell(cluster);
+        if (root->type == id_SLG_MUXF7 && !root->constr_abs_z) {
+            // F7A takes slices A and B, F7C slices C and D.
+            Loc at = ctx->getBelLocation(root_bel);
+            if (ctx->getBelType(root_bel) != id_SLG_MUXF7)
+                return false;
+            placement.clear();
+            placement.emplace_back(root, root_bel);
+            for (CellInfo *lut : root->constr_children)
+                placement.emplace_back(lut, ctx->getBelByLocation(Loc(at.x, at.y, 2 * (at.z - MUXF_Z) + lut->constr_z)));
+            return true;
+        }
+        if (root->type != id_SLG_CARRY)
+            return HimbaechelAPI::getClusterPlacement(cluster, root_bel, placement);
+        Loc at = ctx->getBelLocation(root_bel);
+        if (ctx->getBelType(root_bel) != id_SLG_CARRY || at.z != CARRY_Z)
+            return false;
+        std::vector<Loc> column{at};
+        placement.clear();
+        placement.emplace_back(root, root_bel);
+        for (CellInfo *child : root->constr_children) {
+            while (int(column.size()) <= child->constr_y) {
+                auto up = site_above.find({column.back().x, column.back().y});
+                if (up == site_above.end())
+                    return false;
+                column.push_back(Loc(up->second.first, up->second.second, 0));
+            }
+            Loc l = column.at(child->constr_y);
+            l.z = child->constr_z;
+            BelId bel = ctx->getBelByLocation(l);
+            if (bel == BelId() || !isValidBelForCellType(child->type, bel))
+                return false;
+            placement.emplace_back(child, bel);
+        }
+        return true;
+    }
+
+    // A carry bit, its LUT and its flip-flop sit constr_y sites up the column
+    // from the chain's foot: sites are not evenly spaced, so the offset is the
+    // placed root's, or a column foot's before it is placed.
+    Loc getClusterOffset(const CellInfo *cell) const override
+    {
+        const CellInfo *root = getClusterRootCell(cell->cluster);
+        if (root->type == id_SLG_MUXF7 && !root->constr_abs_z)
+            return Loc(0, 0, 0);
+        if (root->type != id_SLG_CARRY)
+            return HimbaechelAPI::getClusterOffset(cell);
+        std::pair<int, int> foot = column_foot;
+        if (root->bel != BelId())
+            foot = {ctx->getBelLocation(root->bel).x, ctx->getBelLocation(root->bel).y};
+        std::pair<int, int> site = foot;
+        for (int k = 0; k < cell->constr_y && site_above.count(site); k++)
+            site = site_above.at(site);
+        return Loc(site.first - foot.first, site.second - foot.second, cell->constr_z);
     }
 
     // Every output pad is driven by a LUT of its own. On silicon a pad shows
     // the complement of what a flip-flop sends it, and a LUT's output arrives
     // complemented wherever it leaves its site, so through a LUT a pad reads
-    // true (the bitstream tools take the complement back at a LUT's input). A
-    // LUT that drives nothing but the pad may also take a level-13 line, which
-    // inverts: the bitstream tools invert that LUT's table for it.
+    // true. The level-13 lines a route takes invert too; the bitstream tools
+    // take each sink's count back (a pad's in its LUT's table).
     static bool pad_only_lut(const NetInfo *net)
     {
         return net->driver.cell != nullptr && net->driver.cell->type == id_SLG_LUT && net->users.entries() == 1 &&
@@ -430,29 +788,177 @@ struct SlgImpl : HimbaechelAPI
             ctx->cells[cell->name] = std::move(cell);
     }
 
+    // A LUT input on a constant (a buffer for a constant D, an input Yosys left
+    // tied) is folded into the table and disconnected: constants are not routed.
+    void fold_constant_inputs()
+    {
+        const IdString inputs[] = {id_I0, id_I1, id_I2, id_I3, id_I4, id_I5};
+        for (auto &[name, ci] : ctx->cells) {
+            if (ci->type != id_SLG_LUT)
+                continue;
+            uint64_t init = uint64_t(param(ci.get(), id_INIT));
+            for (int k = 0; k < 6; k++) {
+                const NetInfo *net = ci->getPort(inputs[k]);
+                const CellInfo *driver = net ? net->driver.cell : nullptr;
+                if (driver == nullptr || !driver->type.in(ctx->id("VCC"), ctx->id("GND")))
+                    continue;
+                bool one = driver->type == ctx->id("VCC");
+                uint64_t folded = 0;
+                for (int addr = 0; addr < 64; addr++)
+                    folded |= (init >> (one ? addr | (1 << k) : addr & ~(1 << k)) & 1) << addr;
+                init = folded;
+                ci->disconnectPort(inputs[k]);
+            }
+            ci->params[id_INIT] = Property(init, 64);
+        }
+    }
+
+    // A slice's LUT6 is two LUT5 on its first five inputs (gen): with the
+    // sixth tied to 1 (x6_TIE 0) the slice's output is the upper half and its
+    // xMUX pin the lower (MUX_X's OX0), as the vendor's packer pairs LUTs (its
+    // inst_LUT4O, in 2,165 slices of its builds). Two LUTs that share an
+    // input and take five in all become one slice's halves, both rewritten
+    // onto the same five: the upper one may hold its flip-flop, the lower one
+    // nothing else. A LUT that drives a pad is left alone: it is the pad's
+    // own, out by the slice's output.
+    void pair_luts()
+    {
+        static const IdString ports[] = {id_I0, id_I1, id_I2, id_I3, id_I4, id_I5};
+        auto inputs = [&](CellInfo *c) {
+            std::vector<NetInfo *> nets;
+            for (IdString port : ports)
+                if (NetInfo *net = c->getPort(port); net && std::find(nets.begin(), nets.end(), net) == nets.end())
+                    nets.push_back(net);
+            return nets;
+        };
+        auto own_ff_only = [&](const CellInfo *c) {
+            if (c->cluster == ClusterId())
+                return true;
+            if (c->cluster != c->name)
+                return false;
+            for (const CellInfo *child : c->constr_children)
+                if (child->type != id_SLG_FF)
+                    return false;
+            return true;
+        };
+        auto pairable = [&](CellInfo *c) {
+            if (c->type != id_SLG_LUT || !own_ff_only(c) || inputs(c).empty() || inputs(c).size() > 5)
+                return false;
+            const NetInfo *out = c->getPort(id_O);
+            if (out == nullptr || out->users.entries() == 0)
+                return false;
+            for (auto &usr : out->users)
+                if (usr.cell->type == id_SLG_IOB)
+                    return false;
+            return true;
+        };
+        // Each LUT on the nets it takes, in the order of the union.
+        auto rewrite = [&](CellInfo *c, const std::vector<NetInfo *> &onto) {
+            uint64_t init = uint64_t(param(c, id_INIT)), made = 0;
+            std::vector<int> at(6, -1);
+            for (int k = 0; k < 6; k++)
+                if (NetInfo *net = c->getPort(ports[k]))
+                    at[k] = int(std::find(onto.begin(), onto.end(), net) - onto.begin());
+            for (int addr = 0; addr < 64; addr++) {
+                int from = 0;
+                for (int k = 0; k < 6; k++)
+                    if (at[k] >= 0 && (addr >> at[k] & 1))
+                        from |= 1 << k;
+                made |= (init >> from & 1) << addr;
+            }
+            std::vector<NetInfo *> taken;
+            for (int k = 0; k < 6; k++)
+                if (NetInfo *net = c->getPort(ports[k])) {
+                    taken.push_back(net);
+                    c->disconnectPort(ports[k]);
+                }
+            for (int j = 0; j < int(onto.size()); j++)
+                if (std::find(taken.begin(), taken.end(), onto[j]) != taken.end()) {
+                    if (!c->ports.count(ports[j]))
+                        c->addInput(ports[j]);
+                    c->connectPort(ports[j], onto[j]);
+                }
+            c->params[id_INIT] = Property(made, 64);
+        };
+        std::set<const CellInfo *> paired;
+        int pairs = 0;
+        std::vector<CellInfo *> luts;
+        for (auto &[name, ci] : ctx->cells)
+            if (pairable(ci.get()))
+                luts.push_back(ci.get());
+        for (CellInfo *a : luts) {
+            if (paired.count(a))
+                continue;
+            std::vector<NetInfo *> a_in = inputs(a);
+            CellInfo *best = nullptr;
+            int best_shared = 0;
+            for (NetInfo *net : a_in) {
+                if (net->users.entries() > 64)
+                    continue;
+                for (auto &usr : net->users) {
+                    CellInfo *b = usr.cell;
+                    if (b == a || paired.count(b) || !pairable(b) ||
+                        (a->cluster != ClusterId() && b->cluster != ClusterId()))
+                        continue;
+                    std::vector<NetInfo *> b_in = inputs(b);
+                    int shared = 0;
+                    for (NetInfo *n : b_in)
+                        shared += std::find(a_in.begin(), a_in.end(), n) != a_in.end();
+                    if (int(a_in.size() + b_in.size()) - shared <= 5 && shared > best_shared)
+                        best = b, best_shared = shared;
+                }
+            }
+            if (best == nullptr)
+                continue;
+            CellInfo *upper = a->cluster != ClusterId() || best->cluster == ClusterId() ? a : best;
+            CellInfo *lower = upper == a ? best : a;
+            std::vector<NetInfo *> onto = inputs(upper);
+            for (NetInfo *n : inputs(lower))
+                if (std::find(onto.begin(), onto.end(), n) == onto.end())
+                    onto.push_back(n);
+            rewrite(upper, onto);
+            rewrite(lower, onto);
+            if (upper->cluster == ClusterId()) {
+                upper->cluster = upper->name;
+                upper->constr_abs_z = false;
+                upper->constr_z = 0;
+            }
+            lower->type = id_SLG_LUTL;
+            lower->cluster = upper->name;
+            lower->constr_abs_z = false;
+            lower->constr_z = LUTL_Z;
+            upper->constr_children.push_back(lower);
+            paired.insert(upper);
+            paired.insert(lower);
+            pairs++;
+        }
+        if (pairs)
+            log_info("slg47910: %d pairs of LUTs share a slice\n", pairs);
+    }
+
     void pack() override
     {
         for (auto &[name, ci] : ctx->cells) {
-            if (ci->type == id_LUT5 || ci->type == id_LUT6)
-                log_error("slg47910: %s is a %s: a LUT's fifth and sixth inputs are not routable yet; "
-                          "map to four-input LUTs (abc -lut 4)\n",
-                          name.c_str(ctx), ci->type.c_str(ctx));
             std::string type = ci->type.str(ctx);
-            if (type == "CARRY4" || type.rfind("MUXF", 0) == 0 || type.rfind("RAM", 0) == 0 ||
+            if ((type.rfind("MUXF", 0) == 0 && type != "MUXF7" && type != "MUXF8") || type.rfind("RAM", 0) == 0 ||
                 type.rfind("SRL", 0) == 0 || type.rfind("RAMB", 0) == 0 || type.rfind("PLL", 0) == 0 ||
                 type.rfind("MMCM", 0) == 0)
-                log_error("slg47910: %s (%s) is not supported yet: the chipdb has neither the carry chain, MUXF, "
-                          "memory nor a PLL (synthesise with -nobram -nodsp -nolutram, and no carry)\n",
+                log_error("slg47910: %s (%s) is not supported yet: the chipdb has neither MUXF5/6, memory nor a PLL "
+                          "(synthesise with -nobram -nodsp -nolutram)\n",
                           name.c_str(ctx), type.c_str());
         }
         read_pins();
         pack_io();
         pack_luts();
         pack_ffs();
+        pack_muxf();
+        pack_carry();
         pair_ffs();
         buffer_pads();
+        fold_constant_inputs();
         h.replace_constants(CellTypePort(id_SLG_LUT, id_O), CellTypePort(id_SLG_LUT, id_O),
                             {{id_INIT, Property(0xFFFFFFFFFFFFFFFFull, 64)}}, {{id_INIT, Property(0x0ull, 64)}});
+        pair_luts();
     }
 
     // ---- validity ----
@@ -463,62 +969,98 @@ struct SlgImpl : HimbaechelAPI
     }
     IdString getBelBucketForCellType(IdString cell_type) const override { return cell_type; }
 
-    static bool set_type(const Context *ctx, const CellInfo *ci)
+    static bool ff_type_is(const CellInfo *ci, const char *a, const char *b)
     {
         auto it = ci->params.find(id_FF_TYPE);
-        return it != ci->params.end() && (it->second.as_string() == "FDSE" || it->second.as_string() == "FDPE");
+        return it != ci->params.end() && (it->second.as_string() == a || it->second.as_string() == b);
+    }
+
+    const CellInfo *bound_at(Loc at, int z) const
+    {
+        return ctx->getBoundBelCell(ctx->getBelByLocation(Loc(at.x, at.y, z)));
     }
 
     bool isBelLocationValid(BelId bel, bool explain_invalid) const override
     {
         const CellInfo *bound = ctx->getBoundBelCell(bel);
-        if (bound == nullptr)
+        if (bound == nullptr ||
+            !bound->type.in(id_SLG_LUT, id_SLG_LUTL, id_SLG_FF, id_SLG_CARRY, id_SLG_MUXF7, id_SLG_MUXF8))
             return true;
-        if (bound->type == id_SLG_LUT || bound->type == id_SLG_FF) {
-            Loc at = ctx->getBelLocation(bel);
-            // The four nodes of a slice's input pool each feed several slices of
-            // the sites around: a site with every slice full leaves its neighbours
-            // none to route through, and no router can untangle what that costs.
-            int busy = 0;
-            for (int sl = 0; sl < 4; sl++)
-                busy += ctx->getBoundBelCell(ctx->getBelByLocation(Loc(at.x, at.y, sl))) != nullptr ||
-                        ctx->getBoundBelCell(ctx->getBelByLocation(Loc(at.x, at.y, FF_Z + sl))) != nullptr;
-            if (busy > slices) {
-                if (explain_invalid)
-                    log_warning("slg47910: more than %d slices in use at (%d,%d)\n", slices, at.x, at.y);
-                return false;
-            }
-        }
-        if (bound->type != id_SLG_FF)
-            return true;
-        Loc loc = ctx->getBelLocation(bel);
-        const NetInfo *my_ce = bound->getPort(id_CE);
-        const NetInfo *my_r = bound->getPort(id_R);
+        Loc at = ctx->getBelLocation(bel);
+        auto fail = [&](const char *why) {
+            if (explain_invalid)
+                log_warning("slg47910: (%d,%d): %s\n", at.x, at.y, why);
+            return false;
+        };
+        int busy = 0;
+        bool logic = false;
+        std::set<const NetInfo *> i5;
+        std::vector<const CellInfo *> ffs;
+        const CellInfo *mux_of[4] = {};
+        for (int k = 0; k < 3; k++)
+            mux_of[MUXF_SLICE[k]] = bound_at(at, MUXF_Z + k);
         for (int sl = 0; sl < 4; sl++) {
-            if (FF_Z + sl == loc.z)
-                continue;
-            const CellInfo *other = ctx->getBoundBelCell(ctx->getBelByLocation(Loc(loc.x, loc.y, FF_Z + sl)));
-            if (other == nullptr)
-                continue;
-            // one enable and one set/reset per site, of one polarity (the XOR is the site's)
-            if (other->getPort(id_R) != my_r) {
-                if (explain_invalid)
-                    log_warning("slg47910: %s and %s need different resets in one site\n", ctx->nameOf(bound),
-                                ctx->nameOf(other));
-                return false;
-            }
-            if (other->getPort(id_CE) != my_ce) {
-                if (explain_invalid)
-                    log_warning("slg47910: %s and %s need different enables in one site\n", ctx->nameOf(bound),
-                                ctx->nameOf(other));
-                return false;
-            }
-            if (my_r && other->getPort(id_R) && set_type(ctx, other) != set_type(ctx, bound)) {
-                if (explain_invalid)
-                    log_warning("slg47910: %s and %s mix set and reset in one site\n", ctx->nameOf(bound),
-                                ctx->nameOf(other));
-                return false;
-            }
+            const CellInfo *lut = bound_at(at, sl), *ff = bound_at(at, FF_Z + sl), *off = bound_at(at, OFF_Z + sl),
+                           *carry = bound_at(at, CARRY_Z + sl), *mux = mux_of[sl], *lower = bound_at(at, LUTL_Z + sl);
+            // A carry chain or a MUXF8 fills its site.
+            for (const CellInfo *c : {lut, ff, off, carry})
+                logic |= c && (c->cluster == ClusterId() ||
+                               !getClusterRootCell(c->cluster)->type.in(id_SLG_CARRY, id_SLG_MUXF8));
+            busy += lut || ff || off;
+            // A slice holds a LUT with its own flip-flop, or either alone: an
+            // unrelated LUT beside a flip-flop that takes D from the fabric packs
+            // more inputs into the pool nodes than the router can share out
+            // (9 in 10 placements of a small ALU did not route).
+            if (lut && ff && (ff->cluster == ClusterId() || ff->cluster != lut->cluster))
+                return fail("an unrelated LUT and flip-flop share a slice");
+            // XI carries one net: a flip-flop's D from the fabric, the second
+            // flip-flop's (but its slice's first flip-flop's Q), a carry's G.
+            std::set<const NetInfo *> xi;
+            if (ff && ff->cluster == ClusterId())
+                xi.insert(ff->getPort(id_D));
+            if (off && !(ff && off->getPort(id_D) == ff->getPort(id_Q)))
+                xi.insert(off->getPort(id_D));
+            if (carry)
+                xi.insert(carry->getPort(id_DI));
+            if (mux)
+                xi.insert(mux->getPort(id_S));
+            xi.erase(nullptr);
+            if (xi.size() > 1)
+                return fail("two nets want one slice's XI");
+            // one xMUX pin: the second flip-flop's Q, the carry's sum or
+            // carry, a wide mux, or the LUT's lower half
+            if (int(off != nullptr) + int(carry != nullptr) + int(mux != nullptr) + int(lower != nullptr) > 1)
+                return fail("two cells want one slice's xMUX pin");
+            i5.insert(xi.begin(), xi.end());
+            if (lut)
+                i5.insert(lut->getPort(id_I5));
+            for (const CellInfo *f : {ff, off})
+                if (f) {
+                    ffs.push_back(f);
+                    i5.insert(f->getPort(id_CE));
+                    i5.insert(f->getPort(id_R));
+                }
+        }
+        // The four nodes of a slice's input pool each feed several slices of
+        // the sites around: a site with every slice full leaves its neighbours
+        // none to route through, and no router can untangle what that costs.
+        // A carry chain fills its sites (its bits take few inputs each).
+        if (logic && busy > slices)
+            return fail("more slices in use than -o slices allows");
+        // The site's four I5 pins bring in every LUT's I5, every XI, the
+        // enable and the set/reset.
+        i5.erase(nullptr);
+        if (i5.size() > 4)
+            return fail("more than four nets on the I5 pins");
+        // One enable and one set/reset for the site's eight flip-flops, acting
+        // on the clock or at once (QasyncSRen) for all.
+        for (const CellInfo *f : ffs) {
+            if (f->getPort(id_CE) != ffs.front()->getPort(id_CE))
+                return fail("two enables");
+            if (f->getPort(id_R) != ffs.front()->getPort(id_R))
+                return fail("two set/resets");
+            if (f->getPort(id_R) && ff_type_is(f, "FDCE", "FDPE") != ff_type_is(ffs.front(), "FDCE", "FDPE"))
+                return fail("a synchronous and an asynchronous set/reset");
         }
         return true;
     }
@@ -528,18 +1070,6 @@ struct SlgImpl : HimbaechelAPI
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override
     {
         WireId src = ctx->getPipSrcWire(pip), dst = ctx->getPipDstWire(pip);
-        // A hop up a level-13 line inverts the signal. A LUT's INIT can take
-        // that back (the bitstream tools flip the input, or the output of a LUT
-        // that drives only a pad), nothing else can.
-        if (ctx->getWireType(dst) == id_L13) {
-            if (net == nullptr)
-                return false;
-            if (pad_only_lut(net))
-                return true;
-            for (auto &usr : net->users)
-                if (usr.cell->type != id_SLG_LUT)
-                    return false;
-        }
         if (ctx->getWireType(src) == id_PAD)
             return net != nullptr && ctx->getNetinfoSourceWire(net) == src;
         if (ctx->getWireType(dst) == id_PAD) {
@@ -590,7 +1120,14 @@ struct SlgImpl : HimbaechelAPI
                 return ctx->getPipDstWire(pip);
         return WireId();
     }
-    int in_pin(BelId bel, IdString port) const { return pin_of(uphill_bound(ctx->getBelPinWire(bel, port)), "SPI_"); }
+    // The site pin a bel's input comes in by (through XI, for a D or a carry's G).
+    int in_pin(BelId bel, IdString port) const
+    {
+        WireId w = uphill_bound(ctx->getBelPinWire(bel, port));
+        if (w != WireId() && ctx->getWireType(w) == id_XI)
+            w = uphill_bound(w);
+        return pin_of(w, "SPI_");
+    }
     // The net on a port, or the constant the cell holds it at (`key`)
     std::string net_of(const CellInfo *ci, IdString port, const char *key = nullptr) const
     {
@@ -636,8 +1173,12 @@ struct SlgImpl : HimbaechelAPI
                 continue;
             Loc loc = ctx->getBelLocation(ci->bel);
             f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"x\":" << loc.x
-              << ",\"y\":" << loc.y << ",\"slice\":" << loc.z << ",\"init\":" << (uint64_t)param(ci.get(), id_INIT)
-              << ",\"pins\":[";
+              << ",\"y\":" << loc.y << ",\"slice\":" << loc.z << ",\"init\":" << (uint64_t)param(ci.get(), id_INIT);
+            // the lower half's LUT, on the same pins (I5 tied to 1 picks this one)
+            if (const CellInfo *lower = bound_at(loc, LUTL_Z + loc.z))
+                f << ",\"lower\":\"" << json_escape(lower->name.str(ctx))
+                  << "\",\"init_lower\":" << (uint64_t)param(lower, id_INIT);
+            f << ",\"pins\":[";
             first = false;
             static const IdString pins[] = {id_I0, id_I1, id_I2, id_I3, id_I4, id_I5};
             for (int k = 0; k < 6; k++)
@@ -654,7 +1195,8 @@ struct SlgImpl : HimbaechelAPI
             std::string clk_net = net_of(ci.get(), id_CLK);
             Clock clock = clocks.count(clk_net) ? clocks.at(clk_net) : Clock();
             f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"x\":" << loc.x
-              << ",\"y\":" << loc.y << ",\"slice\":" << loc.z - FF_Z << ",\"slot\":\"XQ\",\"ff_type\":\""
+              << ",\"y\":" << loc.y << ",\"slice\":" << loc.z % 4 << ",\"slot\":\""
+              << (loc.z >= OFF_Z ? "OXQ" : "XQ") << "\",\"ff_type\":\""
               << text(ci.get(), id_FF_TYPE) << "\",\"init\":" << param(ci.get(), id_INIT)
               << ",\"d_pin\":" << in_pin(ci->bel, id_D) << ",\"clk_pin\":" << in_pin(ci->bel, id_CLK)
               << ",\"ce_pin\":" << in_pin(ci->bel, id_CE) << ",\"sr_pin\":" << in_pin(ci->bel, id_R)
@@ -666,12 +1208,51 @@ struct SlgImpl : HimbaechelAPI
               << ",\"is_r_inverted\":" << param(ci.get(), id_IS_R_INVERTED)
               << ",\"is_s_inverted\":" << param(ci.get(), id_IS_S_INVERTED)
               << ",\"is_d_inverted\":" << param(ci.get(), id_IS_D_INVERTED);
-            // MUX_XQ's one-hot select, by what drives D: the slice's LUT (X_RAW,
-            // the vendor's default) or a site input (XI). Slice D drops EXTRA_IN, so its bits sit one lower.
+            // The one-hot select of what drives D. MUX_XQ (aq1_sel): the slice's
+            // LUT (X_RAW, the vendor's default), the carry's sum (S_BIT) or XI;
+            // slice D drops EXTRA_IN, so its bits sit one lower. MUX_OXQ
+            // (oaq_sel) of a second flip-flop: XI or the first flip-flop's Q.
             WireId src = uphill_bound(ctx->getBelPinWire(ci->bel, id_D));
-            int abc_bit = (src != WireId() && ctx->getWireType(src) == ctx->id("LUTO")) ? 5 : 1;
-            int field_bit = (loc.z - FF_Z == 3) ? abc_bit - 1 : abc_bit;
-            f << ",\"aq1_sel\":" << (1 << field_bit) << "}";
+            IdString from = src != WireId() ? ctx->getWireType(src) : IdString();
+            if (loc.z >= OFF_Z)
+                f << ",\"oaq_sel\":" << (from == ctx->id("FFQ") ? 2 : 1) << "}";
+            else {
+                int abc_bit = from == id_LUTO ? 5 : from == id_CYO ? 4 : 1;
+                int field_bit = (loc.z % 4 == 3) ? abc_bit - 1 : abc_bit;
+                f << ",\"aq1_sel\":" << (1 << field_bit) << "}";
+            }
+            first = false;
+        }
+
+        f << "\n],\n\"carries\": [";
+        first = true;
+        for (auto &[name, ci] : ctx->cells) {
+            if (ci->type != id_SLG_CARRY || ci->bel == BelId())
+                continue;
+            Loc loc = ctx->getBelLocation(ci->bel);
+            // What leaves by the slice's xMUX pin (MUX_X): the sum, the carry, or neither.
+            auto out = [&](IdString port) {
+                WireId w = downhill_bound(ctx->getBelPinWire(ci->bel, port));
+                return w != WireId() && pin_of(w, "SPO_") >= 0;
+            };
+            f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"x\":" << loc.x
+              << ",\"y\":" << loc.y << ",\"slice\":" << loc.z - CARRY_Z
+              << ",\"ci\":" << param(ci.get(), id_CI_CONST, -1) << ",\"di\":" << param(ci.get(), id_DI_CONST, -1)
+              << ",\"di_pin\":" << in_pin(ci->bel, id_DI) << ",\"xmux\":\""
+              << (out(id_O) ? "S" : out(id_CO) ? "C" : "") << "\"}";
+            first = false;
+        }
+
+        f << "\n],\n\"muxfs\": [";
+        first = true;
+        for (auto &[name, ci] : ctx->cells) {
+            if (!ci->type.in(id_SLG_MUXF7, id_SLG_MUXF8) || ci->bel == BelId())
+                continue;
+            Loc loc = ctx->getBelLocation(ci->bel);
+            WireId out = downhill_bound(ctx->getBelPinWire(ci->bel, id_O));
+            f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"x\":" << loc.x
+              << ",\"y\":" << loc.y << ",\"slice\":" << MUXF_SLICE[loc.z - MUXF_Z]
+              << ",\"sel_pin\":" << in_pin(ci->bel, id_S) << ",\"xmux\":" << (pin_of(out, "SPO_") >= 0) << "}";
             first = false;
         }
 
@@ -745,6 +1326,8 @@ struct SlgImpl : HimbaechelAPI
   private:
     HimbaechelHelpers h;
     int slices = 2;
+    std::map<std::pair<int, int>, std::pair<int, int>> site_above;
+    std::pair<int, int> column_foot;
 };
 
 struct SlgArch : HimbaechelArch

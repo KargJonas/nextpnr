@@ -24,6 +24,9 @@ add_bba_produce_command(
     INPUTS
         ${CMAKE_CURRENT_SOURCE_DIR}/gen/slg47910_gen.py
         ${CMAKE_CURRENT_SOURCE_DIR}/constids.inc
+        ${HIMBAECHEL_SLG47910_DB}/slg47910/graph.json
+        ${HIMBAECHEL_SLG47910_DB}/slg47910/hops.json
+        ${HIMBAECHEL_SLG47910_DB}/slg47910/timing.json
 )
 
 add_bba_compile_command(

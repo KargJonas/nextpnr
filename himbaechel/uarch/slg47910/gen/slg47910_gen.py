@@ -14,10 +14,17 @@ between nodes. It is a flat graph, so the chipdb is a thin layer over it:
     in another tile, is an alias there (`@<x>_<y>_<name>`) that a himbaechel
     node merges with the wire it stands for. The owner is always the node's
     first wire, so every router and every report names the owner;
-  * the logic of an L0 site (4 slices: a LUT6, a flip-flop on the LUT's own
-    output) and an L6 site (an IOB) sit in their tile as bels, their inputs
-    fed from the site's pin nodes by pips, without the L1 memory views, the
-    second flip-flop, the MUXF and the carry chain;
+  * the logic of an L0 site (4 slices: a LUT6, two flip-flops, a bit of the
+    carry chain) and an L6 site (an IOB) sit in their tile as bels, their
+    inputs fed from the site's pin nodes by pips, without the L1 memory views
+    and the 40 L0 sites that have one (their LUTs' I4 pins are not as
+    elsewhere, and designs placed there failed where they passed without
+    them);
+  * each slice's LUT6 as two LUTs: the upper half, and the lower half out by
+    the slice's xMUX pin;
+  * the site's wide muxes: MUXF7 (A or B, C or D) and MUXF8 (of the two);
+  * the carry chain runs from slice A to D of a site and on, by a dedicated
+    pip, to slice A of the next site up its column (the vendor's CIN/COUT);
   * the three dedicated clock inputs (W0, N0, N1) are bels at (0, 0) whose
     pad wire reaches every L0 site's CLK through one GCLK pip.
 
@@ -32,7 +39,33 @@ import re
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../.."))
-from himbaechel_dbgen.chip import BEL_FLAG_GLOBAL, Chip, NodeWire, PinType, TimingValue
+from himbaechel_dbgen.chip import BEL_FLAG_GLOBAL, Chip, ClockEdge, NodeWire, PinType, TimingValue
+
+
+def cells(chip, grade, arcs):
+    """The bels' arcs under one grade, as timing.json fits them to the units'."""
+    value = lambda pair: TimingValue(pair[0], pair[1])
+    lut = chip.timing.add_cell_variant(grade, "SLG_LUT")
+    for pin, delay in arcs["LUT"].items():
+        lut.add_comb_arc(pin, "O", value(delay))
+    # the lower half, out by the xMUX pin: taken as the LUT's (no unit's arc
+    # has been fitted to it)
+    lower = chip.timing.add_cell_variant(grade, "SLG_LUTL")
+    for pin, delay in arcs["LUT"].items():
+        if pin != "I5":
+            lower.add_comb_arc(pin, "O", value(delay))
+    carry = chip.timing.add_cell_variant(grade, "SLG_CARRY")
+    c = arcs["CARRY"]
+    carry.add_comb_arc("CI", "CO", value(c["CI_CO"]))
+    carry.add_comb_arc("P", "CO", value(c["P_CO"]))
+    carry.add_comb_arc("DI", "CO", value(c["P_CO"]))
+    carry.add_comb_arc("CI", "O", value(c["CI_O"]))
+    carry.add_comb_arc("P", "O", value(c["CI_O"]))
+    ff = chip.timing.add_cell_variant(grade, "SLG_FF")
+    f = arcs["FF"]
+    for pin in ("D", "CE", "R"):
+        ff.add_setup_hold("CLK", pin, ClockEdge.RISING, value(f["SETUP"]), TimingValue(0))
+    ff.add_clock_out("CLK", "Q", ClockEdge.RISING, value(f["CLK_Q"]))
 
 
 def main():
@@ -63,7 +96,7 @@ def main():
     clock_pads = {}
 
     def type_of(nid):
-        return pin_type.get(nid) or ("L13" if wires[nid]["name"].startswith("U13") else "SM")
+        return pin_type.get(nid) or "SM"
 
     def local(x, y, nid):
         """The name of node `nid` in tile (x, y): its own, or an alias there."""
@@ -77,28 +110,28 @@ def main():
             aliases.setdefault(nid, []).append((x, y, name))
         return name
 
-    chip.set_speed_grades(["DEFAULT"])
-    classes = set()
+    # The fabric's timing as the vendor states it, read by Kraken and checked
+    # against the vendor's routes (timing.json, from Kraken's export by
+    # tools/kraken_timing.py): per pip a class, its delay and the wire's it
+    # drives together, per speed grade; the timed grade first, the default.
+    timing = json.load(open(os.path.join(args.db, "slg47910", "timing.json")))
+    grades = timing["grades"]
+    chip.set_speed_grades(grades)
+    pip_class = timing["pips"]
 
-    def pip(tt, src, dst, kind, cost=0):
-        # The graph's costs read as femtoseconds (median 2.2e6, a plausible
-        # 2.2 ns): a pip's delay is its cost in ps, to the nearest 100, and at
-        # least 100: congestion is priced by delay, so a wire that costs nothing
-        # is one a router never moves a net off.
-        bucket = max(1, round(cost / 100000))
-        name = f"P{bucket}"
-        classes.add(bucket)
-        made = tt.create_pip(src, dst, name)
+    def pip(tt, src, dst, kind, stated=None):
+        """A pip; `stated` the key of its delay in timing.json, where one is
+        stated: the others -- into and out of sites -- take none, the cells'
+        arcs holding the way to and from a site's pins."""
+        made = tt.create_pip(src, dst, pip_class.get(stated, "T0"))
         made.pip_type = chip.strs.id(kind)
 
     for w in db["wires"]:
         by_tile[(w["x"], w["y"])].create_wire(w["name"], type_of(w["id"]))
 
-    # The graph's own pips, in the tile of the wire each one drives. A hop up
-    # a level-13 line inverts the signal, so they are typed `L13` for the uarch
-    # to give only to nets whose inversion a LUT can take back, and they cost
-    # 3 ns more: their eight wires at the chip's middle are what a router would
-    # take across the chip, and fight over.
+    # The graph's own pips, in the tile of the wire each one drives, each
+    # timed as the vendor states (timing.json): its delay is the
+    # connection's and the resource it drives together.
     # Only the kinds of hop (which mux, fed from which, how far away) the
     # vendor's router takes in its own builds (hops.json): it never takes four
     # in ten of the graph's mux-to-mux edges, and on silicon a counter routed
@@ -118,7 +151,7 @@ def main():
             continue
         seen.add((p["src"], p["dst"]))
         d = wires[p["dst"]]
-        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], "PIP", p["cost"] + (3000000 if d["name"].startswith("U13") else 0))
+        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], "PIP", f"{d['x']},{d['y']},{a['name']},{d['name']}")
 
     # The dedicated clock inputs, at (0, 0): the pad wire of each is a node
     # that every L0 site's CLK is one pip from.
@@ -131,10 +164,8 @@ def main():
         tt0.add_bel_pin(bel, "PAD", wire, PinType.OUTPUT)
         clock_pads[token] = wire
 
-    # A memory site is one of the L0 sites with an L1 view: the writer has no
-    # LUT_IPT_SEL for the slices there yet (the 40 of them are the M units), so
-    # they hold no logic.
     memory = {(s["x"], s["y"]) for s in db["sites"] if s["type"] == "L1"}
+    site_at = {(s["sx"], s["sy"]): (s["x"], s["y"]) for s in sites if s["type"] == "L0" and (s["x"], s["y"]) not in memory}
     for s in sites:
         x, y = s["x"], s["y"]
         if s["type"] == "L0" and (x, y) in memory:
@@ -170,11 +201,23 @@ def main():
                 w = local(x, y, nid)
                 pip(tt, w, "CE", "MUX")
                 pip(tt, w, "SR", "MUX")
+        # The carry into slice A: the carry out of the site below in the column.
+        tt.create_wire("CIN", "CIN")
+        below = site_at.get((s["sx"], s["sy"] - 1))
+        if below is not None:
+            alias = f"@{below[0]}_{below[1]}_COUT3"
+            tt.create_wire(alias, "COUT")
+            aliases.setdefault(("cout",) + below, []).append((x, y, alias))
+            pip(tt, alias, "CIN", "CARRY")
         for sl in range(4):
-            luto, ffd, ffq = f"LUTO{sl}", f"FFD{sl}", f"FFQ{sl}"
-            tt.create_wire(luto, "LUTO")
-            tt.create_wire(ffd, "FFD")
-            tt.create_wire(ffq, "FFQ")
+            luto, ffd, ffq, xi = f"LUTO{sl}", f"FFD{sl}", f"FFQ{sl}", f"XI{sl}"
+            cyo, cout = f"CYO{sl}", f"COUT{sl}"
+            for w, kind in ((luto, "LUTO"), (ffd, "FFD"), (ffq, "FFQ"), (xi, "XI"), (cyo, "CYO"), (cout, "COUT")):
+                tt.create_wire(w, kind)
+            # XI: one of the site's I5 pins through MUX_xI, the flip-flop's D
+            # from the fabric and the carry's generate input both.
+            for j in range(4):
+                pip(tt, local(x, y, pins[f"I{j * 6 + 5}"]["node"]), xi, "MUX")
             lut = tt.create_bel(f"LUT{sl}", "SLG_LUT", z=sl)
             tt.add_bel_pin(lut, "O", luto, PinType.OUTPUT)
             for k in range(6):
@@ -182,23 +225,69 @@ def main():
                 tt.create_wire(li, "LUTI")
                 tt.add_bel_pin(lut, f"I{k}", li, PinType.INPUT)
                 # I0-I3 have the slice's own pins (A 0-3, B 6-9, ...). I4 and I5
-                # are muxed from the site's inputs by a one-hot select over four
-                # shared pins that the encoder does not write yet: no pip, so
-                # no route the bitstream would get wrong.
-                if k < 4:
-                    pip(tt, local(x, y, pins[f"I{sl * 6 + k}"]["node"]), li, "MUX")
+                # take any of the site's four shared pins of their kind (4, 10,
+                # 16, 22 and 5, 11, 17, 23) through MUX_x5 and MUX_x6.
+                for j in ([sl] if k < 4 else range(4)):
+                    pip(tt, local(x, y, pins[f"I{j * 6 + k}"]["node"]), li, "MUX")
             # a LUT leaves by its own slice's O pin only (arch_init.cc)
             pip(tt, luto, local(x, y, pins[f"O{26 + 3 * sl}"]["node"]), "OMUX")
+            # The LUT6 is two LUT5 on I0-I4, I5 choosing: with I5 tied to 1
+            # (x6_TIE 0) the LUT is the upper half, and the lower half a LUT of
+            # its own, out by the slice's xMUX pin (MUX_X's OX0).
+            lower = tt.create_bel(f"LUTL{sl}", "SLG_LUTL", z=20 + sl)
+            tt.create_wire(f"LUTLO{sl}", "LUTLO")
+            tt.add_bel_pin(lower, "O", f"LUTLO{sl}", PinType.OUTPUT)
+            for k in range(5):
+                tt.add_bel_pin(lower, f"I{k}", f"LUTI{sl}_{k}", PinType.INPUT)
+            pip(tt, f"LUTLO{sl}", local(x, y, pins[f"O{27 + 3 * sl}"]["node"]), "XMUX")
             ff = tt.create_bel(f"FF{sl}", "SLG_FF", z=4 + sl)
             tt.add_bel_pin(ff, "D", ffd, PinType.INPUT)
             tt.add_bel_pin(ff, "Q", ffq, PinType.OUTPUT)
             tt.add_bel_pin(ff, "CLK", "CLK", PinType.INPUT)
             tt.add_bel_pin(ff, "CE", "CE", PinType.INPUT)
             tt.add_bel_pin(ff, "R", "SR", PinType.INPUT)
-            # A flip-flop takes its D from its slice's LUT. (From a site input
-            # it would go through the same shared pins as I4 and I5.)
-            pip(tt, luto, ffd, "FFDMUX")
+            # A flip-flop takes its D from its slice's LUT, the carry's sum, or
+            # XI (MUX_XQ).
+            for w in (luto, cyo, xi):
+                pip(tt, w, ffd, "FFDMUX")
             pip(tt, ffq, local(x, y, pins[f"O{28 + 3 * sl}"]["node"]), "OMUX")
+            # A bit of the carry chain: P is the LUT's output, G is XI;
+            # O = P ^ CI, CO = P ? CI : G. Its sum or its carry leaves the
+            # site by the slice's xMUX pin (MUX_X).
+            # The second flip-flop (OXQ): D from XI or the first flip-flop's Q
+            # (MUX_OXQ), Q out by the slice's xMUX pin only (MUX_X).
+            offd, offq = f"OFFD{sl}", f"OFFQ{sl}"
+            tt.create_wire(offd, "OFFD")
+            tt.create_wire(offq, "OFFQ")
+            off = tt.create_bel(f"OFF{sl}", "SLG_FF", z=12 + sl)
+            tt.add_bel_pin(off, "D", offd, PinType.INPUT)
+            tt.add_bel_pin(off, "Q", offq, PinType.OUTPUT)
+            for pin, wire in (("CLK", "CLK"), ("CE", "CE"), ("R", "SR")):
+                tt.add_bel_pin(off, pin, wire, PinType.INPUT)
+            for w in (xi, ffq):
+                pip(tt, w, offd, "FFDMUX")
+            pip(tt, offq, local(x, y, pins[f"O{27 + 3 * sl}"]["node"]), "XMUX")
+            carry = tt.create_bel(f"CARRY{sl}", "SLG_CARRY", z=8 + sl)
+            tt.add_bel_pin(carry, "P", luto, PinType.INPUT)
+            tt.add_bel_pin(carry, "DI", xi, PinType.INPUT)
+            tt.add_bel_pin(carry, "CI", "CIN" if sl == 0 else f"COUT{sl - 1}", PinType.INPUT)
+            tt.add_bel_pin(carry, "O", cyo, PinType.OUTPUT)
+            tt.add_bel_pin(carry, "CO", cout, PinType.OUTPUT)
+            for w in (cyo, cout):
+                pip(tt, w, local(x, y, pins[f"O{27 + 3 * sl}"]["node"]), "XMUX")
+        # The site's wide muxes (the vendor's MUXF, its EXTRA_IN): F7A = A or
+        # B's LUT, F7C = C or D's, F8 = F7A or F7C, each selected by one
+        # slice's XI (A, C, B) and leaving by that slice's xMUX pin (MUX_X).
+        for name, kind, z, ins, sel, sl in (("F7A", "SLG_MUXF7", 16, ("LUTO0", "LUTO1"), "XI0", 0),
+                                            ("F7C", "SLG_MUXF7", 17, ("LUTO2", "LUTO3"), "XI2", 2),
+                                            ("F8", "SLG_MUXF8", 18, ("F7A", "F7C"), "XI1", 1)):
+            tt.create_wire(name, "MUXF")
+            mux = tt.create_bel(name, kind, z=z)
+            tt.add_bel_pin(mux, "I0", ins[0], PinType.INPUT)
+            tt.add_bel_pin(mux, "I1", ins[1], PinType.INPUT)
+            tt.add_bel_pin(mux, "S", sel, PinType.INPUT)
+            tt.add_bel_pin(mux, "O", name, PinType.OUTPUT)
+            pip(tt, name, local(x, y, pins[f"O{27 + 3 * sl}"]["node"]), "XMUX")
         # the global clock: one pip from each pad's wire
         for token, pad in clock_pads.items():
             alias = f"@0_0_{pad}"
@@ -208,13 +297,18 @@ def main():
 
     for (x, y) in by_tile:
         chip.set_tile_type(x, y, f"T_{x}_{y}")
-    for bucket in sorted(classes - {0}):
-        chip.timing.set_pip_class("DEFAULT", f"P{bucket}", TimingValue(bucket * 100))
+    for i, grade in enumerate(grades):
+        chip.timing.set_pip_class(grade, "T0", TimingValue(0))
+        for name, by in timing["classes"].items():
+            chip.timing.set_pip_class(grade, name, TimingValue(*by[i]))
+        cells(chip, grade, timing["cells"][grade])
 
     # Merge each node's aliases into it, its owner first.
     for nid, where in aliases.items():
-        if isinstance(nid, tuple):
+        if isinstance(nid, tuple) and nid[0] == "clk":
             owner = NodeWire(0, 0, clock_pads[nid[1]])
+        elif isinstance(nid, tuple):
+            owner = NodeWire(nid[1], nid[2], "COUT3")
         else:
             w = wires[nid]
             owner = NodeWire(w["x"], w["y"], w["name"])
