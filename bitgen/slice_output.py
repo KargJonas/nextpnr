@@ -18,8 +18,9 @@ this; see eda_placer.criticality for the Anet kernel it will consume.
 import os
 import re
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_R2SP = os.path.join(_ROOT, "device", "graph", "minplacer.rnode2sitepin_def")
+from bitgen.database import GRAPH
+
+_R2SP = str(GRAPH / "minplacer.rnode2sitepin_def")
 _LINE = re.compile(r"(\d+),(\d+) (\d+),(\d+)L(\d+) (\d+)")
 
 

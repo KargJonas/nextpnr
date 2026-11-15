@@ -31,8 +31,8 @@ _SM_NAME = re.compile(r"^([UD])(\d+)B(\d+)N(\d+)$")
 
 
 def _graph_dir():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, "device", "graph")
+    from bitgen.database import GRAPH
+    return str(GRAPH)
 
 
 @dataclass

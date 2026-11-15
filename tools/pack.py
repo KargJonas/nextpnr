@@ -35,8 +35,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from bitgen import coords  # noqa: E402
 
 # Default template: empty bitstream from eda-placer
-DEFAULT_TEMPLATE = PROJECT_ROOT / "device" / "template.bin"
-DEFAULT_DB = PROJECT_ROOT / "device"
+from bitgen.database import DB  # noqa: E402
+
+DEFAULT_TEMPLATE = DB / "template.bin"
+DEFAULT_DB = DB
 
 BITSTREAM_WORDS = 11264  # 45056 bytes
 NVM_WORDS = 15           # first 15 words are NVM registers
@@ -369,7 +371,7 @@ def row_formula_to_bitstream(formula, rbb_x):
 # The interior CLB mux selectors (MUX_x5 / MUX_x6 / MUX_xI / MUX_CE / MUX_SR
 # at the even columns 2-28) follow one regular encoding, which holds for every
 # one of them in all 816 vendor builds of the corpus (row_formulas.json has no
-# entries for them: see device/PROVENANCE.md).
+# entries for them: see forgefpga's README).
 
 _INTERIOR_MUX_SEL4 = {
     "ASEL": 0,
@@ -1644,9 +1646,9 @@ def verify_bitstream(packed_words, reference_path):
 # ---------------------------------------------------------------------------
 
 _AXI_PERM_CACHE: list[int] | None = None
-_AXI_PERM_PATH = PROJECT_ROOT / "device" / "axi_perm.bin"
+_AXI_PERM_PATH = DB / "axi_perm.bin"
 _AXI_BASELINE_BITS_CACHE: list[int] | None = None
-_AXI_BASELINE_PATH = PROJECT_ROOT / "device" / "axi_perm.baseline.bin"
+_AXI_BASELINE_PATH = DB / "axi_perm.baseline.bin"
 
 _MCU_PREAMBLE_ZEROS = 1280
 _MCU_SYNC_WORD = 0xAA22FF11

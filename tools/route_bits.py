@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bitgen import bitstream, rgraph, sm_emit  # noqa: E402
+from bitgen.database import DB  # noqa: E402
 
 N_GRAPH = 48544                      # vendor routing-graph node count
 N_SM = 40960                         # ids below this are SM mux nodes
@@ -35,7 +36,7 @@ CONSTANT_NETS = {"$PACKER_GND", "$PACKER_VCC"}
 
 def load_clock_entry():
     """[(word, bit, value)] the vendor writes for a W0-clocked design."""
-    return [tuple(x) for x in json.loads((ROOT / "device" / "clock_w0.json").read_text())]
+    return [tuple(x) for x in json.loads((DB / "clock_w0.json").read_text())]
 
 
 def net_hops(g, pips, exit_select):

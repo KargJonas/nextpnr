@@ -24,11 +24,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 
-# Default paths relative to project root
-ARCH_DIR = os.path.join(
-    os.path.dirname(__file__), "..",
-    "device/graph"
-)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from bitgen.database import GRAPH  # noqa: E402
+
+ARCH_DIR = str(GRAPH)
 
 DELIMITER = "@^#$a~%_!D+=/>,-@"
 
@@ -104,7 +103,7 @@ class RoutingGraph:
 
 def _strip_encwrap(lines):
     """Skip encwrap header lines, yield data lines between delimiters.
-    A .clean dump (device/graph) has no wrapper: every line is data."""
+    A .clean dump (forgefpga's slg47910/graph) has no wrapper: every line is data."""
     lines = [l.rstrip('\n').rstrip('\r') for l in lines]
     if not any(l.startswith(DELIMITER) for l in lines):
         yield from lines
@@ -143,7 +142,7 @@ def parse_rgraph(path):
         lines = list(_strip_encwrap(f))
 
     # The vendor header "D <nodes> E <edges>" sits on the encwrap delimiter
-    # line, so the decrypted .clean dump (device/graph) starts at the edges.
+    # line, so the decrypted .clean dump (forgefpga's slg47910/graph) starts at the edges.
     num_nodes = num_edges = None
     m = re.match(r'D\s+(\d+)\s+E\s+(\d+)', lines[0]) if lines else None
     if m:
@@ -209,7 +208,7 @@ def parse_rnode2sm(path):
 
     # Parse header
     # The "[start,end)" range header sits on the encwrap delimiter line, so
-    # the decrypted .clean dump (device/graph) starts at the first node.
+    # the decrypted .clean dump (forgefpga's slg47910/graph) starts at the first node.
     m = re.match(r'\[(\d+),(\d+)\)', lines[0])
     if m:
         start_id, end_id = int(m.group(1)), int(m.group(2))
@@ -249,7 +248,7 @@ def parse_rnode2sitepin(path):
         lines = list(_strip_encwrap(f))
 
     # The "[start,end)" range header sits on the encwrap delimiter line, so
-    # the decrypted .clean dump (device/graph) starts at the first node.
+    # the decrypted .clean dump (forgefpga's slg47910/graph) starts at the first node.
     m = re.match(r'\[(\d+),(\d+)\)', lines[0])
     if m:
         start_id, end_id = int(m.group(1)), int(m.group(2))

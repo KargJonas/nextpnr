@@ -12,6 +12,7 @@ image:
 
 # The Project Inkwell database the himbaechel chipdb is built from.
 FORGEFPGA ?= ../Project-Inkwell/forgefpga
+export FORGEFPGA
 
 himbaechel-image:
 	podman build -t localhost/nextpnr-slg47910-hb --build-context forgefpga=$(FORGEFPGA) -f himbaechel/Containerfile himbaechel
@@ -19,7 +20,7 @@ himbaechel-image:
 build/hb/%/bitstream_mcu.bin: designs/%/$$*.v designs/%/$$*.pins build/chipdb.json
 	himbaechel/flow.sh designs/$*/$*.v $* designs/$*/$*.pins build/hb/$*
 
-build/chipdb.json: device/graph/minplacer.rgraph_def tools/gen_chipdb.py tools/routing_graph.py
+build/chipdb.json: $(FORGEFPGA)/slg47910/graph/minplacer.rgraph_def tools/gen_chipdb.py tools/routing_graph.py
 	python3 tools/gen_chipdb.py -o $@
 
 build/%/bitstream_mcu.bin: designs/%/$$*.v designs/%/$$*.pins build/chipdb.json

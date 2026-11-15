@@ -13,13 +13,12 @@ with no predecessor search (the route gives the source). It is the single place
 the encoder rules are applied generatively.
 """
 
-import os
 
 from . import (sm_routing, sm_writer, bitstream, coords, rgraph,
                slice_output)
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TMPL = os.path.join(_ROOT, "device", "template.bin")
+from .database import DB
+_TMPL = str(DB / "template.bin")
 _G = None       # cached rgraph (load once)
 
 

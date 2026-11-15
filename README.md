@@ -35,12 +35,12 @@ oscillator). Output pads are supported on GPIO8-15.
 | `nextpnr/slg47910/` | the Viaduct uarch: chipdb loading, bels, packing, placement checks, JSON export |
 | `nextpnr/upstream.patch` | the two lines nextpnr itself needs (uarch registration, a Viaduct fix) |
 | `Containerfile` | nextpnr at `7de80fb` + the uarch, yosys, python |
-| `device/` | the device model: decrypted vendor routing graph, template image, format tables ([provenance](device/PROVENANCE.md)) |
+| `bitgen/database.py` | where the device database is: Project Inkwell's forgefpga `slg47910/` (routing graph, template image, format tables, timing; its README says where each comes from), `$FORGEFPGA` or `../Project-Inkwell/forgefpga` |
 | `tools/gen_chipdb.py`, `tools/routing_graph.py` | vendor graph -> `build/chipdb.json` |
 | `tools/route_bits.py` | nextpnr routing -> switch-matrix bits, via `bitgen/` |
 | `bitgen/` | the switch-matrix encoder transcribed from the vendor placer (eflx-port) |
 | `tools/emit_sdc.py` | nextpnr placement -> site configuration (LUT truth tables, FF/carry/IOB muxes) |
 | `tools/pack.py` | site configuration + routing bits -> config image and SPI image |
-| `tools/decrypt_eflx.py` | decrypts the vendor's `_def` files (to regenerate `device/graph`) |
+| `tools/decrypt_eflx.py` | decrypts the vendor's `_def` files (to regenerate forgefpga's `slg47910/graph`) |
 | `hw/` | flashing + capture tool, RP2040 firmware |
 | `designs/` | `blinky/` (the target), `probes/` (ring oscillators, clock witness, osc probe) |

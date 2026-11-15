@@ -24,7 +24,7 @@ SRC="$(realpath "$1")"; TOP="$2"; PINS="$(realpath "$3")"; OUT="$(realpath -m "$
 mkdir -p "$OUT"
 [[ -f "$REPO/build/chipdb.json" ]] || python3 "$REPO/tools/gen_chipdb.py" -o "$REPO/build/chipdb.json"
 
-podman run --rm --init --userns=keep-id -e NEXTPNR_TIMEOUT -e FREQ -v "$HOME:$HOME" -w "$OUT" localhost/nextpnr-slg47910-hb bash -euo pipefail -c "
+podman run --rm --init --userns=keep-id -e NEXTPNR_TIMEOUT -e FREQ -e FORGEFPGA -v "$HOME:$HOME" -w "$OUT" localhost/nextpnr-slg47910-hb bash -euo pipefail -c "
 yosys -q -l yosys.log -p 'read_verilog -lib -specify +/xilinx/cells_sim.v +/xilinx/cells_xtra.v; read_verilog -sv $SRC; synth -top $TOP -flatten -run :fine; techmap -map +/techmap.v -map +/xilinx/arith_map.v -D LUT_SIZE=6; synth -lut 6 -run fine:; dfflegalize -cell \$_SDFFE_PP0P_ 0 -cell \$_SDFFE_PP1P_ 1 -cell \$_DFFE_PP0P_ 0 -cell \$_DFFE_PP1P_ 1; opt_merge; abc -lut 6; opt_merge; techmap -D LUT_WIDTH=6 -map +/xilinx/lut_map.v -map +/xilinx/ff_map.v; clean; write_json netlist.json'
 for seed in 1 2 3; do
   : > tools.log
