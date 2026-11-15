@@ -468,12 +468,6 @@ def assign_pins(sl, pins):
         else:
             on_nondedicated.append((k, pin))
 
-    if len(on_nondedicated) > 2:
-        # Can't map more than 2 signals to muxed inputs.
-        # This is a routing error — the design can't be implemented.
-        print(f"WARNING: slice {SLICE_LETTER[sl]}: {len(on_nondedicated)} signals "
-              f"on non-dedicated pins (max 2). Design may be incorrect.",
-              file=sys.stderr)
 
     # Build permutation: perm[physical_bit] = logical_input_idx
     perm = [-1] * 6
@@ -485,15 +479,17 @@ def assign_pins(sl, pins):
         perm[ded_slot] = log_k if perm[ded_slot] == -1 else \
             (perm[ded_slot] if isinstance(perm[ded_slot], tuple) else (perm[ded_slot],)) + (log_k,)
 
-    # Map non-dedicated signals to A5 (bit 4) and A6 (bit 5).
+    # The site's shared pins: 4, 10, 16, 22 reach A5 (address bit 4) through
+    # MUX_x5, and 5, 11, 17, 23 reach A6 (bit 5) through MUX_x6.
     mux5_pin = -1
     mux6_pin = -1
-    if len(on_nondedicated) >= 1:
-        perm[4] = on_nondedicated[0][0]
-        mux5_pin = on_nondedicated[0][1]
-    if len(on_nondedicated) >= 2:
-        perm[5] = on_nondedicated[1][0]
-        mux6_pin = on_nondedicated[1][1]
+    for log_k, pin in on_nondedicated:
+        if pin % 6 == 4 and mux5_pin < 0:
+            perm[4], mux5_pin = log_k, pin
+        elif pin % 6 == 5 and mux6_pin < 0:
+            perm[5], mux6_pin = log_k, pin
+        else:
+            raise UnsupportedBackendFeature(f"slice {SLICE_LETTER[sl]}: input on pin {pin} has no way into its LUT")
 
     return (perm, mux5_pin, mux6_pin)
 
@@ -637,17 +633,12 @@ def validate_ff(ff, prefix):
             "fabric FFs ignore per-FF clock inversion"
         )
 
-    # INIT validation: the hardware always resets FFs to 0 on power-on.
-    # The XOR on MUX_SR controls set vs reset behavior when SR is asserted.
-    # Non-default INIT values (FDRE with INIT=1 or FDSE with INIT=0) would
-    # require a separate configuration bit that hasn't been located yet.
-    init_val = int(ff.get('init', 0))
-    default_init = 1 if ff_is_set_type(ff_type) else 0
-    if init_val != default_init:
-        raise UnsupportedBackendFeature(
-            f"{prefix}: FF INIT={init_val} differs from default for {ff_type} "
-            f"(expected {default_init}); non-default INIT not yet supported"
-        )
+    # A flip-flop's stored bit starts at 0: a clearing one starts at 0, a
+    # setting one (which holds its value inverted) at 1. Yosys writes INIT 0 for a
+    # setting one whose start the design leaves open, so only a clearing one
+    # that must start at 1 is refused.
+    if int(ff.get('init', 0)) != 0 and not ff_is_set_type(ff_type):
+        raise UnsupportedBackendFeature(f"{prefix}: {ff_type} INIT=1: a clearing flip-flop starts at 0")
 
 
 def resolve_shared_ff_control(ffs, prefix, pin_key, net_key, default_pin, mux_name):
@@ -747,7 +738,7 @@ def emit_sdc(placement, out_file):
             rbb_x, rbb_y = site_to_rbb(sx, sy, site_type)
             key = (rbb_x, rbb_y)
             if key not in used_rbbs:
-                used_rbbs[key] = {"luts": {}, "ffs": {}, "rams": {}}
+                used_rbbs[key] = {"luts": {}, "ffs": {}, "offs": {}, "rams": {}}
             return key
 
         # Skip nextpnr's $PACKER_VCC_DRV / $PACKER_GND_DRV constant-driver LUTs.
@@ -771,11 +762,19 @@ def emit_sdc(placement, out_file):
 
         for ff in placement.get('ffs', []):
             key = ensure_rbb(ff['sx'], ff['sy'], ff.get('site_type', 'L0'))
-            used_rbbs[key]["ffs"][ff['slice']] = ff
+            used_rbbs[key]["offs" if ff.get('slot') == 'OXQ' else "ffs"][ff['slice']] = ff
 
         for ram in placement.get('rams', []):
             key = ensure_rbb(ram['sx'], ram['sy'], ram.get('site_type', 'L0'))
             used_rbbs[key]["rams"][ram['slice']] = ram
+
+        carries = {}  # (rbb_x, rbb_y) -> {slice: carry bit}
+        for c in placement.get('carries', []):
+            carries.setdefault(ensure_rbb(c['sx'], c['sy']), {})[c['slice']] = c
+        # the wide muxes (F7A, F8, F7C) by the slice whose XI selects them
+        muxfs = {}  # (rbb_x, rbb_y) -> {slice: mux}
+        for m in placement.get('muxfs', []):
+            muxfs.setdefault(ensure_rbb(m['sx'], m['sy']), {})[m['slice']] = m
 
         # 8-FF model (Phase 1): per-slice OAQ_SEL / AMX_SEL state from emit.cc.
         # Keyed by (rbb_x, rbb_y) → { slice_idx → entry }. Each entry carries
@@ -843,6 +842,8 @@ def emit_sdc(placement, out_file):
             prefix = f"TILE_00/RBB_{rbb_x}_{rbb_y}"
             lut_slices = used_rbbs[(rbb_x, rbb_y)]["luts"]
             ff_slices = used_rbbs[(rbb_x, rbb_y)]["ffs"]
+            off_slices = used_rbbs[(rbb_x, rbb_y)]["offs"]  # the slices' second flip-flops (OXQ)
+            site_ffs = list(ff_slices.values()) + list(off_slices.values())
             ram_slices = used_rbbs[(rbb_x, rbb_y)]["rams"]
             is_memory_clb = rbb_y in MEMORY_CLB_ROWS
             sitewide_rams = [ram for ram in ram_slices.values() if is_sitewide_ram32x1d(ram)]
@@ -875,32 +876,13 @@ def emit_sdc(placement, out_file):
                     )
                 validate_native_ram32m_site(ram_slices, lut_slices, ff_slices, prefix)
 
-            for ff in ff_slices.values():
+            for ff in site_ffs:
                 validate_ff(ff, prefix)
 
-            # Determine SR XOR: all FFs in CLB must agree on set vs reset type.
-            # Vendor FDRE/FDCE probes with R tied low use MUX_SR XOR=1; SET-type
-            # FFs flip that shared polarity so an asserted SR drives Q high.
+            # A block whose set/reset is held inactive takes MUX_SR's XOR 1 (the
+            # vendor's flip-flops with R tied low): whether a slice sets or
+            # clears is its own xQpol, below.
             sr_xor = 1
-            if ff_slices:
-                sr_types = set()
-                for ff in ff_slices.values():
-                    ft = ff.get('ff_type') or 'FDRE'
-                    sr_types.add(ff_is_set_type(ft))
-                if len(sr_types) > 1:
-                    raise UnsupportedBackendFeature(
-                        f"{prefix}: cannot mix SET-type (FDSE/FDPE) and RESET-type (FDRE/FDCE) "
-                        f"FFs in the same CLB (shared MUX_SR polarity)"
-                    )
-                if True in sr_types:
-                    sr_xor = 0
-                # Handle IS_R_INVERTED / IS_S_INVERTED: XOR with sr_xor
-                for ff in ff_slices.values():
-                    ft = ff.get('ff_type') or 'FDRE'
-                    inv_key = 'is_s_inverted' if ft in ('FDSE', 'FDPE') else 'is_r_inverted'
-                    if ff.get(inv_key, 0):
-                        sr_xor ^= 1
-                        break  # shared per CLB, one inversion applies to all
 
             # --- MUX selects per slice ---
             if sitewide_ram is not None:
@@ -925,6 +907,13 @@ def emit_sdc(placement, out_file):
                         init = lut['init']
                         perm, mux5_pin, mux6_pin = assign_pins(sl, pins)
                         new_init = permute_init(init, perm)
+                        if 'init_lower' in lut:
+                            # Two LUTs on the slice's first five inputs: the sixth
+                            # tied to 1 (x6_TIE 0) takes the upper half to the slice's
+                            # output, the lower half out by xMUX (MUX_X's OX0).
+                            if mux6_pin >= 0:
+                                raise UnsupportedBackendFeature(f"{prefix}: slice {letter}'s two LUTs take six inputs")
+                            f.write(f"set_case_analysis 0 {prefix}/{letter}6_TIE\n")
                     else:
                         mux5_pin = -1
                         mux6_pin = -1
@@ -940,6 +929,14 @@ def emit_sdc(placement, out_file):
                     # open flow previously emitted value=0 which lands a wrong
                     # bit in the physical mux storage. See
                     # docs/methodology/sym-bucket6-findings.md.
+                    # A routed A5 or A6 is selected one-hot by the feeder it came
+                    # in by (route_bits.py, pool_inputs), as the enable is.
+                    cell = ram if ram is not None else lut
+                    lands = placement.get('control_lands', {})
+                    if mux5_pin >= 0:
+                        mux5_pin = 1 << lands[(cell['sx'], cell['sy'], mux5_pin)]
+                    if mux6_pin >= 0:
+                        mux6_pin = 1 << lands[(cell['sx'], cell['sy'], mux6_pin)]
                     mux5_val = mux5_pin if mux5_pin >= 0 else 1
                     emit_mux_sel(f, prefix, f"MUX_{letter}5", mux5_val, 4)
 
@@ -967,29 +964,60 @@ def emit_sdc(placement, out_file):
                     xor_val = 0 if (is_carry_co or ram is not None) else 1
                     ff = ff_slices.get(sl)
                     ff_d_pin = ff.get('d_pin', -1) if ff is not None else -1
+                    off = off_slices.get(sl)
+                    if off is not None and off.get('oaq_sel') == 1:
+                        # the second flip-flop's D from XI, when the first takes none from there
+                        if ff_d_pin >= 0 and off.get('d_pin') != ff_d_pin:
+                            raise UnsupportedBackendFeature(f"{prefix}: slice {letter}'s two flip-flops need XI")
+                        ff, ff_d_pin = off, off.get('d_pin', -1)
                     mux_i_pin = 16
-                    if ff is not None and lut is None and ram is None and ff_d_pin >= 0:
-                        mux_i_pin = ff_d_pin
+                    carry = carries.get((rbb_x, rbb_y), {}).get(sl)
+                    muxf = muxfs.get((rbb_x, rbb_y), {}).get(sl)
+                    if muxf is not None:
+                        # XI selects the wide mux: its I5 feeder, XOR as a D's.
+                        if ff_d_pin >= 0 or carry is not None:
+                            raise UnsupportedBackendFeature(f"{prefix}: slice {letter} needs XI for a wide mux and more")
+                        mux_i_pin = 1 << placement['control_lands'][(muxf['sx'], muxf['sy'], muxf['sel_pin'])]
+                        xor_val = muxf.get('sel_inverted', 0)
+                    elif carry is not None:
+                        # XI is the carry's G as well as a flip-flop's D: a constant
+                        # is the fifth input, a 1 that the XOR inverts (the vendor's
+                        # carry slices: 315 of 315 G = 0 at XOR 1, 17 of 17 G = 1 at 0).
+                        if ff_d_pin >= 0:
+                            raise UnsupportedBackendFeature(f"{prefix}: slice {letter} needs XI for a carry and a flip-flop")
+                        if carry['di'] >= 0:
+                            xor_val = 1 - carry['di']
+                        else:
+                            mux_i_pin = 1 << placement['control_lands'][(carry['sx'], carry['sy'], carry['di_pin'])]
+                            xor_val = carry.get('di_inverted', 0)
+                    elif ff_d_pin >= 0:
+                        # D from the fabric (XI): one of the I5 feeders, one-hot by
+                        # its branch, as MUX_x6 selects A6 (route_bits.py, pool_inputs).
+                        mux_i_pin = 1 << placement['control_lands'][(ff['sx'], ff['sy'], ff_d_pin)]
+                        # XOR 0 takes XI as it comes, 1 inverts it (on silicon; MUX_CE's
+                        # XOR is the other way round): 1 where it arrives complemented
+                        # (a LUT's output, level-13 lines: hb_emit.py).
+                        xor_val = ff.get('d_inverted', 0)
                     emit_mux_sel_with_xor(f, prefix, f"MUX_{letter}I", mux_i_pin, xor_val, 5)
 
             # --- MUX_CE and MUX_SR (shared) ---
             if sitewide_ram is None:
                 ce_pin = resolve_shared_ff_control(
-                    list(ff_slices.values()), prefix, 'ce_pin', 'ce_net', 8, "MUX_CE"
+                    site_ffs, prefix, 'ce_pin', 'ce_net', 8, "MUX_CE"
                 )
                 sr_pin = resolve_shared_ff_control(
-                    list(ff_slices.values()), prefix, 'sr_pin', 'sr_net', 1, "MUX_SR"
+                    site_ffs, prefix, 'sr_pin', 'sr_net', 1, "MUX_SR"
                 )
-                ce_nets = {ff.get('ce_net', '') for ff in ff_slices.values() if ff.get('ce_net')}
+                ce_nets = {ff.get('ce_net', '') for ff in site_ffs if ff.get('ce_net')}
                 ce_xor = 1 if ce_nets == {'$PACKER_VCC'} else 0
                 # A routed enable or reset comes in by one of four feeders, and
                 # the mux selects it one-hot (route_bits.py, pool_inputs).
                 control = placement.get('control_lands', {})
-                site = next(((ff['sx'], ff['sy']) for ff in ff_slices.values()), (None, None))
+                site = next(((ff['sx'], ff['sy']) for ff in site_ffs), (None, None))
                 ce_way = control.get((*site, ce_pin)) if ce_nets - {'$PACKER_VCC'} else None
-                sr_nets = {ff.get('sr_net', '') for ff in ff_slices.values() if ff.get('sr_net')}
+                sr_nets = {ff.get('sr_net', '') for ff in site_ffs if ff.get('sr_net')}
                 sr_way = control.get((*site, sr_pin)) if sr_nets - {'$PACKER_GND'} else None
-                ce_flip = int(any(ff.get('ce_inverted', 0) for ff in ff_slices.values()
+                ce_flip = int(any(ff.get('ce_inverted', 0) for ff in site_ffs
                                   if ff.get('ce_net') not in (None, '', '$PACKER_VCC')))
                 if ce_nets - {'$PACKER_VCC'} and ce_way is None:
                     raise UnsupportedBackendFeature(f"{prefix}: the enable {sorted(ce_nets)} is not routed to the site")
@@ -1004,19 +1032,32 @@ def emit_sdc(placement, out_file):
                 f.write(f"set_case_analysis {0 if ce_way is None else 1} {prefix}/MUX_CE/CIN\n")
                 # MUX_SR's XOR is the reset's polarity alone: 0 takes it as it
                 # comes. It clears: what makes a flip-flop set instead is not known.
-                inverted = any(ff.get('is_r_inverted', 0) for ff in ff_slices.values())
-                inverted ^= any(ff.get('sr_inverted', 0) for ff in ff_slices.values()
+                inverted = any(ff.get('is_r_inverted', 0) for ff in site_ffs)
+                inverted ^= any(ff.get('sr_inverted', 0) for ff in site_ffs
                                 if ff.get('sr_net') not in (None, '', '$PACKER_GND'))
                 emit_mux_sel_with_xor(f, prefix, "MUX_SR", sr_pin if sr_way is None else 1 << sr_way,
                                       int(inverted) if sr_way is not None else sr_xor, 5)
-                # A flip-flop takes a routed set/reset only where its slice says so.
-                for sl, ff in ff_slices.items():
-                    if ff.get('sr_net') not in (None, '', '$PACKER_GND'):
-                        if (ff.get('ff_type') or 'FDRE') != 'FDRE':
-                            raise UnsupportedBackendFeature(
-                                f"{prefix}: {ff.get('ff_type')} with a routed set, clear or preset: only the "
-                                "synchronous reset is known to work (flow.sh has Yosys build the others from it)")
-                        f.write(f"set_case_analysis 1 {prefix}/{SLICE_LETTER[sl]}QsyncSRen\n")
+                # A slice's flip-flop takes a routed set/reset on the clock
+                # (syncSRen: FDRE, FDSE) or the block's at once (QasyncSRen:
+                # FDCE, FDPE). It always clears what it holds; xQpol 0 inverts
+                # its D on the way in, so a setting flip-flop holds its value
+                # inverted and every sink of its Q takes that back (hb_emit.py):
+                # so the vendor's flip-flops of each kind, 2,400 to 2,500 each.
+                # The template holds pol 1 and QasyncSRen 1: both are written.
+                # A second flip-flop has the same, O-prefixed, and its xQpol also
+                # takes back a D that comes inverted (d_parity: hb_emit.py).
+                for first, slices in (('', ff_slices), ('O', off_slices)):
+                    asynchronous = 0
+                    for sl, ff in slices.items():
+                        kind = ff.get('ff_type') or 'FDRE'
+                        pol = (0 if kind in ('FDSE', 'FDPE') else 1) ^ ff.get('d_parity', 0)
+                        f.write(f"set_case_analysis {pol} {prefix}/{first}{SLICE_LETTER[sl]}Qpol\n")
+                        if ff.get('sr_net') not in (None, '', '$PACKER_GND'):
+                            if kind in ('FDCE', 'FDPE'):
+                                asynchronous = 1
+                            else:
+                                f.write(f"set_case_analysis 1 {prefix}/{first}{SLICE_LETTER[sl]}QsyncSRen\n")
+                    f.write(f"set_case_analysis {asynchronous} {prefix}/{first}QasyncSRen\n")
 
             # --- BC bits (LUT INIT / RAM INIT) ---
             if sitewide_ram is not None:
@@ -1038,6 +1079,10 @@ def emit_sdc(placement, out_file):
                         init = lut['init']
                         perm, _, _ = assign_pins(sl, pins)
                         new_init = permute_init(init, perm)
+                        if 'init_lower' in lut:
+                            # the upper half the slice's LUT, the lower its other one
+                            lower = permute_init(lut['init_lower'], perm)
+                            new_init = (new_init & ~0xFFFFFFFF) | (lower & 0xFFFFFFFF)
                     else:
                         new_init = 0
 
@@ -1101,7 +1146,7 @@ def emit_sdc(placement, out_file):
                 'clk_net': ff.get('clk_net', ''),
                 'clk_pin': ff.get('clk_pin', -1),
                 'clk_token': ff.get('clk_token', ''),
-            } for ff in ff_slices.values()]
+            } for ff in site_ffs]
             for ram in ram_slices.values():
                 clk_items.append({
                     'clk_domain': ram.get('clk_domain', 0),
@@ -1144,10 +1189,18 @@ def emit_sdc(placement, out_file):
                                            ('AQ1_SEL', aq1_sel, 5 if sl == 3 else 6)):
                     for fb in range(nbits):
                         f.write(f"set_case_analysis {(value >> fb) & 1} {prefix}/{name}_{letter}[{fb}]\n")
+            # CIN_SEL: the carry into slice A is 0 (00), 1 (01) or the carry out
+            # of the block below (11): the vendor's chains, 32, 15 and 202 of them.
+            foot = carries.get((rbb_x, rbb_y), {}).get(0)
+            cin_sel = 0 if foot is None or foot['ci'] == 0 else 1 if foot['ci'] == 1 else 3
+            for k in range(2):
+                f.write(f"set_case_analysis {cin_sel >> k & 1} {prefix}/CIN_SEL[{k}]\n")
             # One more block field the SDC has no name for: bl10 wl31 of the
-            # block's (col+1, row+1) tile, 0 in every block the vendor uses
-            # (1 in the template); with it at 1 the flip-flop never toggles.
-            emit_direct_nvm_bit(f, *_word_bit(rbb_y + 1, rbb_x + 1, 10, 31), 0)
+            # block's (col+1, row+1) tile, 0 in every block the vendor uses (1 in
+            # the template). In columns 4, 10, .. 28 that bit is QasyncSRen,
+            # written above.
+            if rbb_x % 6 == 1:
+                emit_direct_nvm_bit(f, *_word_bit(rbb_y + 1, rbb_x + 1, 10, 31), 0)
 
         # --- Side-/north-edge IOB outputs ---
         # These use a different route-aware mux scheme than CLB rows. The

@@ -38,13 +38,38 @@ def main():
     for iob in placement["iobs"]:
         iob["net"] = constant.get(iob["net"], iob["net"])
     luts_at = {(c["x"], c["y"], c["slice"]): c for c in placement["luts"]}
-    for cell in placement["luts"] + placement["ffs"]:
+    # A setting flip-flop (FDSE, FDPE) is a clearing one whose D xQpol inverts:
+    # it holds its value inverted, and every sink of its Q takes that back.
+    setting = {(ff["x"], ff["y"], ff["slice"], ff["slot"]) for ff in placement["ffs"] if ff["ff_type"] in ("FDSE", "FDPE")}
+    for cell in placement["luts"] + placement["ffs"] + placement["carries"] + placement["muxfs"]:
         s = site[(cell.pop("x"), cell.pop("y"))]
         cell.update(site_type="L0", sx=s["sx"], sy=s["sy"])
-    placement["slice_muxes"] = [
-        {"sx": ff["sx"], "sy": ff["sy"], "site_type": "L0", "slice": ff["slice"], "oaq_sel": 2, "aq1_sel": ff["aq1_sel"]}
-        for ff in placement["ffs"]
-    ]
+    # MUX_XQ (aq1_sel) by what drives a flip-flop, MUX_X (amx_sel) by what
+    # leaves by the xMUX pin: S_BIT or C_BIT (slice D drops EXTRA_IN, one lower).
+    # A second flip-flop (OXQ) takes MUX_OXQ (oaq_sel) and leaves by xMUX (MUX_X's OXQ).
+    muxes = {}
+    for ff in placement["ffs"]:
+        m = muxes.setdefault((ff["sx"], ff["sy"], ff["slice"]), {})
+        if ff["slot"] == "OXQ":
+            m.update(oaq_sel=ff["oaq_sel"], amx_sel=1 if ff["slice"] == 3 else 2)
+        else:
+            m["aq1_sel"] = ff["aq1_sel"]
+    for c in placement["carries"]:
+        if c["xmux"]:
+            bit = (4 if c["xmux"] == "S" else 3) - (c["slice"] == 3)
+            muxes.setdefault((c["sx"], c["sy"], c["slice"]), {})["amx_sel"] = 1 << bit
+    # A slice's lower half leaves by its xMUX pin as MUX_X's OX0 (the vendor's
+    # AMX_SEL 00100, slice D 0010, in all 369 slices of its builds that pair LUTs).
+    for lut in placement["luts"]:
+        if "lower" in lut:
+            muxes.setdefault((lut["sx"], lut["sy"], lut["slice"]), {})["amx_sel"] = 4 if lut["slice"] < 3 else 2
+    # A wide mux (F7A, F8, F7C) leaves by its slice's xMUX pin as MUX_X's EXTRA_IN
+    # (the vendor's AMX_SEL 00001 at every one of 208 in its builds).
+    for m in placement["muxfs"]:
+        if m["xmux"]:
+            muxes.setdefault((m["sx"], m["sy"], m["slice"]), {})["amx_sel"] = 1
+    placement["slice_muxes"] = [dict(sx=sx, sy=sy, site_type="L0", slice=sl, **{"oaq_sel": 2, **m})
+                                for (sx, sy, sl), m in muxes.items()]
     for iob in placement["iobs"]:
         branch = re.search(r"D0B(\d+)N", iob["pad_in_sm"])
         iob.update(pad_in_d0_branch=int(branch.group(1)) if branch else -1, oe_pin=-1, oe_sm="", oe_d0_branch=-1)
@@ -75,57 +100,77 @@ def main():
                 {"PIP": data, "CLKPIP": clock}.get(kind, []).append([s, d])
         nets.append({"name": net["name"], "pips": pips})
     # A hop up a level-13 line inverts the signal, and so does a LUT's output
-    # leaving its site (on silicon: build/sv9/t1-t3, comb, duty): a LUT input
-    # reached through an odd number of these is inverted in the LUT's table,
-    # which takes it back.
-    compensated, checked, lut_nets = [], [], set()
-    for net in routing["nets"]:
-        parent = {dst: src for src, dst, _kind in net["pips"]}
-        from_lut = any(kind == "OMUX" and re.search(r"/LUTO\d$", src) for src, _dst, kind in net["pips"])
-        if from_lut:
-            lut_nets.add(net["name"])
-        for dst in list(parent):
-            m = re.fullmatch(r"X(\d+)Y(\d+)/LUTI(\d)_(\d)", dst)
-            if not m:
-                continue
-            checked.append(dst)
-            hops, wire = int(from_lut), dst
-            while wire in parent:
-                wire = parent[wire]
-                hops += wire.rsplit("/", 1)[1].startswith("U13")
-            if hops % 2:
-                x, y, slice_, k = (int(v) for v in m.groups())
-                lut = luts_at[(x, y, slice_)]
-                n = max(i for i, pin in enumerate(lut["pins"]) if pin >= 0) + 1
-                init = lut["init"]
-                flipped = init & ~((1 << (1 << n)) - 1)
-                for i in range(1 << n):
-                    flipped |= (init >> (i ^ (1 << k)) & 1) << i
-                lut["init"] = flipped
-                compensated.append(dst)
-    # A LUT that drives only a pad (the uarch gives every pad one) may take
-    # level-13 lines: an odd number of them on the way is taken back by
-    # inverting the LUT's output.
-    for net in routing["nets"]:
-        parent = {dst: src for src, dst, _kind in net["pips"]}
-        pads = [dst for _src, dst, kind in net["pips"] if kind == "IOPAD" and dst.endswith("/PAD")]
-        drivers = [re.fullmatch(r"X(\d+)Y(\d+)/LUTO(\d)", src) for src, _dst, kind in net["pips"] if kind == "OMUX"]
-        if len(pads) != 1 or len(drivers) != 1 or drivers[0] is None:
-            continue
-        hops, wire = 0, pads[0]
+    # leaving its site; a pad shows the complement of what reaches it, which the
+    # uarch takes back by giving every pad a LUT of its own. Each sink takes an
+    # odd count back where it can: a LUT input in its LUT's table, a pad in its
+    # LUT's output, a site's enable or reset in MUX_CE / MUX_SR's XOR, XI (a
+    # flip-flop's D from the fabric, a carry's G) in MUX_xI's (emit_sdc.py).
+    def u13_hops(parent, wire):
+        hops = 0
         while wire in parent:
             wire = parent[wire]
             hops += wire.rsplit("/", 1)[1].startswith("U13")
-        if hops % 2:
-            lut = luts_at[tuple(int(v) for v in drivers[0].groups())]
-            n = max([i for i, pin in enumerate(lut["pins"]) if pin >= 0], default=-1) + 1
-            lut["init"] ^= (1 << (1 << n)) - 1 if n else (1 << 64) - 1
-            compensated.append(pads[0])
-    # An enable or a reset a LUT drives arrives complemented too: the site's
-    # MUX_CE / MUX_SR take it back with their XOR (emit_sdc.py).
+        return hops
+
+    compensated, checked, control = [], [], {}
+    for net in routing["nets"]:
+        if net["name"] in constant.values():
+            continue  # the oscillator enable's constant: no LUT, the tools encode it
+        parent = {dst: src for src, dst, _kind in net["pips"]}
+        drivers = [re.fullmatch(r"X(\d+)Y(\d+)/LUTO(\d)", src) for src, _dst, kind in net["pips"] if kind == "OMUX"]
+        drivers = [d for d in drivers if d]
+        from_lut = any(drivers)  # a carry's sum or carry leaves by xMUX true (on silicon)
+        from_lut ^= any((int(m[1]), int(m[2]), int(m[4]), "OXQ" if m[3] else "XQ") in setting for m in
+                        (re.fullmatch(r"X(\d+)Y(\d+)/(O?)FFQ(\d)", src) for src, _dst, _kind in net["pips"]) if m)
+        for dst in list(parent):
+            m = re.fullmatch(r"X(\d+)Y(\d+)/LUTI(\d)_(\d)", dst)
+            if m:
+                checked.append(dst)
+                # The I4 pins complement what reaches them (on silicon): there a
+                # flip-flop's output arrives inverted and a LUT's arrives true.
+                x, y, slice_, k = (int(v) for v in m.groups())
+                if (from_lut + (k == 4) + u13_hops(parent, dst)) % 2:
+                    lut = luts_at[(x, y, slice_)]
+                    n = max(i for i, pin in enumerate(lut["pins"]) if pin >= 0) + 1
+                    # both halves of a slice take the pin (init_lower: the lower one's LUT)
+                    for half in ("init", "init_lower"):
+                        if half not in lut:
+                            continue
+                        init = lut[half]
+                        flipped = init & ~((1 << (1 << n)) - 1)
+                        for i in range(1 << n):
+                            flipped |= (init >> (i ^ (1 << k)) & 1) << i
+                        lut[half] = flipped
+                    compensated.append(dst)
+            elif re.fullmatch(r"X\d+Y\d+/O?FFD\d", dst):
+                checked.append(dst)  # D in its slice, or XI's (taken back at XI)
+            elif re.fullmatch(r"X\d+Y\d+/(CE|SR|XI\d)", dst):
+                checked.append(dst)
+                control[dst] = (from_lut + u13_hops(parent, dst)) % 2
+            elif dst.endswith("/PAD") and u13_hops(parent, dst) % 2:
+                lut = luts_at[tuple(int(v) for v in drivers[0].groups())]
+                n = max([i for i, pin in enumerate(lut["pins"]) if pin >= 0], default=-1) + 1
+                lut["init"] ^= (1 << (1 << n)) - 1 if n else (1 << 64) - 1
+                compensated.append(dst)
+    tile_of = {(s["sx"], s["sy"]): xy for xy, s in site.items()}
+    # A second flip-flop that takes its slice's first flip-flop's Q (MUX_OXQ's
+    # XQ) gets it inverted when the first is a setting one: its xQpol takes
+    # that back (emit_sdc.py).
     for ff in placement["ffs"]:
-        ff["ce_inverted"] = int(ff.get("ce_net") in lut_nets)
-        ff["sr_inverted"] = int(ff.get("sr_net") in lut_nets)
+        if ff["slot"] == "OXQ" and ff["oaq_sel"] == 2:
+            x, y = tile_of[(ff["sx"], ff["sy"])]
+            ff["d_parity"] = int((x, y, ff["slice"], "XQ") in setting)
+    for ff in placement["ffs"]:
+        x, y = tile_of[(ff["sx"], ff["sy"])]
+        ff["ce_inverted"] = control.get(f"X{x}Y{y}/CE", 0)
+        ff["sr_inverted"] = control.get(f"X{x}Y{y}/SR", 0)
+        ff["d_inverted"] = control.get(f"X{x}Y{y}/XI{ff['slice']}", 0)
+    for c in placement["carries"]:
+        x, y = tile_of[(c["sx"], c["sy"])]
+        c["di_inverted"] = control.get(f"X{x}Y{y}/XI{c['slice']}", 0)
+    for m in placement["muxfs"]:
+        x, y = tile_of[(m["sx"], m["sy"])]
+        m["sel_inverted"] = control.get(f"X{x}Y{y}/XI{m['slice']}", 0)
     json.dump(placement, open(placement_out, "w"), indent=1)
     json.dump({"pips": data, "clock_pips": clock, "pad_nodes": pad_nodes, "nets": nets, "compensated": compensated,
                "checked": checked},

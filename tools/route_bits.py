@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bitgen import rgraph, sm_emit  # noqa: E402
+from bitgen import bitstream, rgraph, sm_emit  # noqa: E402
 
 N_GRAPH = 48544                      # vendor routing-graph node count
 N_SM = 40960                         # ids below this are SM mux nodes
@@ -98,14 +98,16 @@ def pool_inputs(g, routing):
             if not (N_SM <= dst < N_GRAPH) or not src < N_SM:
                 continue
             pin = g.nodes[dst]
-            if pin.pin >= 24 or pin.pin % 6 == 4:
+            if pin.pin >= 24:
                 continue
             site = pin.site
-            if pin.pin % 6 == 5:
-                # I5 of the four slices share four feeders, and MUX_CE / MUX_SR
-                # select among them by the feeder's branch (A-D = D0B0-D0B3: all
-                # of 7,400 routed enables and resets of the vendor's builds).
-                # Reported as pin 100 + pin, apart from the LUT inputs.
+            if pin.pin % 6 >= 4:
+                # The site's I4 and I5 pins share four feeders each, and MUX_x5
+                # (I4), MUX_x6, MUX_CE and MUX_SR (I5) select among them by the
+                # feeder's branch (A-D = D0B0-D0B3: all of 7,400 routed enables
+                # and resets, and of 29,000 fifth and sixth LUT inputs, of the
+                # vendor's builds). Reported as pin 100 + pin, apart from the
+                # pool pins.
                 sx, sy = (int(v) for v in re.match(r"(\d+),(\d+)", site).groups())
                 if re.match(r"\d+,\d+L0", site):
                     out.append([sx, sy, 100 + pin.pin, g.nodes[src].branch])
@@ -148,6 +150,50 @@ def inverting_paths(g, routing, virtual):
     return out
 
 
+def followed_enables(g, routing, virtual, words):
+    """[(pad, wire)] for every output pad whose enable would follow a net.
+
+    A row-31 pad takes its enable from the first of its four (0,'D') input
+    muxes, or the second when its data comes by the first (emit_sdc's MUX_O1),
+    and no net is routed to that mux: it holds while the mux, and the (1,'D')
+    mux it selects, sit on idle wires. sm_emit keeps idle muxes off the wires
+    in use, as the vendor does, and cannot when every one of their sources is
+    in use: then the pad would follow one of those nets. Also [(pad, mux)]
+    for every enable whose mux, or the one it selects, sm_emit moved."""
+    on_net = {n for net in routing["nets"] for pip in net["pips"] for n in pip if n < N_SM}
+    template = bitstream.Image.from_template(sm_emit._TMPL).words
+    moved = []
+
+    def selected(nid):
+        node = g.nodes[nid]
+        held = sm_emit._selval(words, node.x, node.y, node.key)
+        return [p for p, _ in g.radj.get(nid, []) if g.is_sm(p)
+                and sm_emit.value_for(node.key, g.nodes[p].key, False, tval=held, active=True) == held]
+
+    out = []
+    for net in routing["nets"]:
+        parent = {b: a for a, b in net["pips"]}
+        for a, b in net["pips"]:
+            if not virtual.get(b, "").endswith("/PAD") or parent.get(a, N_SM) >= N_SM:
+                continue
+            data = g.nodes[parent[a]].key[2]
+            enable = next(m for m, _ in g.radj[a] if g.is_sm(m) and g.nodes[m].key[2] == (1 if data == 0 else 0))
+            front = [enable]
+            for _ in range(2):  # the enable's mux, then the one that selects
+                if front and front[0] not in on_net:
+                    # Where the template has them is where a pad's enable is
+                    # known to hold: each pad's first line, on silicon in every
+                    # build that passed. Moved off a line in use (sm_emit) it
+                    # rests on its next one, and there the pads let go
+                    # (func_width_scope: both enables on D5B2N0 at (17, 28)).
+                    node = g.nodes[front[0]]
+                    if sm_emit._selval(words, node.x, node.y, node.key) != sm_emit._selval(template, node.x, node.y, node.key):
+                        moved.append((virtual[b], node.sm_name))
+                    front = selected(front[0])
+            out += [(virtual[b], g.nodes[n].sm_name) for n in front if n in on_net]
+    return out, moved
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("routing")
@@ -185,6 +231,11 @@ def main():
     image, n = sm_emit.emit_design(g, nets, bound_ports={}, input_tiles=set(),
                                    exit_select=exit_select)
     words = image.words
+    followed, moved = followed_enables(g, routing, virtual, words)
+    for pad, wire in followed:
+        sys.exit(f"route_bits: the enable of {pad} would follow the net on {wire}: every line it could rest on is in use")
+    for pad, wire in moved:
+        sys.exit(f"route_bits: the enable of {pad} would leave the line it is known to hold on: a net is on the one {wire} rests on")
     for w, b, v in load_clock_entry():
         words[w] = (words[w] | (1 << b)) if v else (words[w] & ~(1 << b))
     Path(args.output).write_bytes(struct.pack(f"<{len(words)}I", *words))

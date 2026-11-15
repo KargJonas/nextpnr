@@ -435,17 +435,63 @@ def interior_mux_to_bitstream(rbb_x, rbb_row, signal):
     ri = (rbb_row - 2) // 2
     x = rbb_x + 1
 
-    sync = re.fullmatch(r"([ABCD])QsyncSRen", signal)
+    sync = re.fullmatch(r"([ABCD])Q(syncSRen|pol)", signal)
     if sync:
-        # Whether a slice's flip-flop takes the block's set/reset (on the
-        # clock). The vendor names it in its simulation netlist only (*.vm),
-        # not among its settings; the bit follows the name in every block of
-        # 200 builds. Left at 0, a routed reset did nothing on silicon.
+        # Whether a slice's flip-flop takes the block's set/reset on the clock
+        # (syncSRen; left at 0, a routed reset did nothing on silicon), and
+        # whether the set/reset clears it (pol 1, FDRE and FDCE) or sets it
+        # (pol 0, FDSE and FDPE). The vendor names them in its simulation
+        # netlist only (*.vm); each bit follows its name in every block of the
+        # corpus, pol a row above syncSRen.
         sl = "ABCD".index(sync.group(1))
-        pos, lanes = ((_INTERIOR_MUX_POS_OTHER, [27, 1, 23, 29]) if sl % 2 == 0
-                      else (_INTERIOR_MUX_POS_5, [6, 12, 18, 24]))
-        return (xyp_to_word(rbb_x + (0 if sl < 2 else 2), 0, pos[ri]),
-                _interior_mux_row_bit(ri, lanes), False)
+        base, k = (315, 2) if sl % 2 == 0 else (326, 0)
+        idx = base - 26 * ri + 16 * ((ri + k) // 4)
+        return (xyp_to_word(rbb_x + (0 if sl < 2 else 2), 1 if sync.group(2) == "pol" else 0, idx // 32),
+                idx % 32, False)
+
+    tie = re.fullmatch(r"([ABCD])6_TIE", signal)
+    if tie:
+        # Whether a slice's sixth LUT input is its pin (1, the template's) or
+        # tied to 1 (0: the slice's output is the LUT's upper half, its xMUX
+        # the lower). Named in the vendor's *.vm only; pol's row and columns, A
+        # and C in one lane, B and D nine bits up: it follows the name in all
+        # 55,532 slices of 797 vendor builds.
+        sl = "ABCD".index(tie.group(1))
+        idx = 316 - 26 * ri + 16 * ((ri + 1) // 4) + (9 if sl % 2 else 0)
+        return (xyp_to_word(rbb_x + (0 if sl < 2 else 2), 1, idx // 32), idx % 32, False)
+
+    second = re.fullmatch(r"O([ABCD])Q(syncSRen|pol)", signal)
+    if second:
+        # The same of a slice's second flip-flop (OXQ), in the block's middle
+        # column. Its bit runs along the row's 11 words as base - 26 ri +
+        # 16 floor((ri + k) / 4) (A and B as their first flip-flop's); each
+        # follows its name in every block of the corpus.
+        base, k = {"A": (315, 2), "B": (326, 0), "C": (316, 1), "D": (325, 1)}[second.group(1)]
+        idx = base - 26 * ri + 16 * ((ri + k) // 4)
+        return (xyp_to_word(x, 1 if second.group(2) == "pol" else 0, idx // 32), idx % 32, False)
+
+    if signal == "OQasyncSRen":
+        # QasyncSRen of the block's second flip-flops: row 24, a lane above
+        # QasyncSRen's in columns 1, 7, .. 25.
+        return (xyp_to_word(x, 24, _INTERIOR_MUX_POS_OTHER[ri]),
+                _interior_mux_row_bit(ri, [24, 14, 20, 26]) + 1, False)
+
+    if signal == "QasyncSRen":
+        # Whether the block's set/reset acts at once (FDCE, FDPE) rather than on
+        # the clock: one bit for the block's four flip-flops, in the vendor's
+        # *.vm only; it follows the name in every block of the corpus.
+        lane = _interior_mux_row_bit(ri, [24, 14, 20, 26])
+        return ((xyp_to_word(x, 24, _INTERIOR_MUX_POS_OTHER[ri]), lane, False) if rbb_x % 6 == 1
+                else (xyp_to_word(x, 31, _INTERIOR_MUX_POS_OTHER[ri]), lane + 1, False))
+
+    cin = re.fullmatch(r"CIN_SEL\[([01])\]", signal)
+    if cin:
+        # What carries into slice A of the block: 00 a 0, 01 a 1, 11 the carry
+        # out of the block below. Named in the vendor's *.vm only; bit 1 follows
+        # the name in every block of the corpus that varies it, bit 0 sits one
+        # higher in the same word (as MUX_CE/CIN's lane, on row 17).
+        return (xyp_to_word(x, 17, _INTERIOR_MUX_POS_OTHER[ri]),
+                _interior_mux_row_bit(ri, [24, 14, 20, 26]) + (1 - int(cin.group(1))), False)
 
     if signal == "MUX_CE/CIN":
         # What MUX_CE's fifth input (ESEL) is: 1, the clock enable of the
@@ -791,14 +837,7 @@ def rbb_clk_sel_to_bitstream(rbb_x, rbb_row, signal):
         bit_idx = 324 - 26 * ri + 16 * ((ri + 1) // 4)
         pos = bit_idx // 32
         bit = bit_idx % 32
-        # CLK_SEL has a second copy in the RBB's middle tile, BL10 WL24 of its
-        # first row in columns 1/7/../25 and WL31 of its second in 4/10/../28
-        # (equal to CLK_SEL in every vendor build; 22 two-clock exceptions at
-        # column 1). The template holds it at 1: left there, the flip-flops of
-        # columns 19 and 25 never clocked.
-        shadow = (coords.trace_to_word_bit(rbb_row, rbb_x + 1, 10, 24) if rbb_x % 6 == 1
-                  else coords.trace_to_word_bit(rbb_row + 1, rbb_x + 1, 10, 31))
-        return [(xyp_to_word(rbb_x + 1, 25, pos), bit, False), (*shadow, False)]
+        return [(xyp_to_word(rbb_x + 1, 25, pos), bit, False)]
 
     return None
 
@@ -1081,10 +1120,19 @@ def oaq_sel_to_bitstream(rbb_x, rbb_row, slice_idx, field_bit):
 # do not write speculative bits. The current open sitewide RAM32X1D path only
 # emits the vendor-observed fixed logical value 01000 (=8), which we treat as an
 # accepted template-preserved shape.
+# LUT_IPT_SEL[k] of a memory CLB: (col+1, row 26+k) at one word and lane per
+# block row; bits 0-3 follow the name in every one of the corpus's 4,072
+# memory blocks. Bit 4 is 0 in all of them, its position unknown.
+_LUT_IPT_SEL_POS_BIT = {6: (8, 30), 8: (8, 4), 22: (3, 14), 24: (2, 20)}
+
+
 def lut_ipt_sel_to_bitstream(rbb_x, rbb_row, signal):
     """Convert a covered LUT_IPT_SEL[n] signal to bitstream position."""
-    del rbb_x, rbb_row, signal
-    return None
+    m = re.fullmatch(r'LUT_IPT_SEL\[([0-3])\]', signal)
+    if not m or rbb_row not in _LUT_IPT_SEL_POS_BIT:
+        return None
+    pos, bit = _LUT_IPT_SEL_POS_BIT[rbb_row]
+    return (xyp_to_word(rbb_x + 1, 26 + int(m.group(1)), pos), bit, False)
 
 
 def collect_lut_ipt_values(sdc_data):
@@ -1103,25 +1151,9 @@ def collect_lut_ipt_values(sdc_data):
 
 
 def lut_ipt_sel_is_known_fixed_shape(rbb_x, rbb_row, signal, value, lut_ipt_values):
-    """Return True for the vendor-grounded LUT_IPT_SEL shapes of a memory CLB.
-
-    A memory CLB used as plain logic carries 00000 and the sitewide
-    single-RBB RAM32X1D mode the fixed logical value 01000 (=8), in every
-    vendor-backed example. Preserve the template bitstream shape for both
-    instead of reporting the field as unmapped.
-    """
-    if rbb_row not in _MEMORY_CLB_ROWS:
-        return False
-
-    m = re.match(r'LUT_IPT_SEL\[(\d+)\]', signal)
-    if not m:
-        return False
-
-    if lut_ipt_values.get((rbb_x, rbb_row)) not in (0, 8):
-        return False
-
-    sel_bit = int(m.group(1))
-    return ((8 >> sel_bit) & 1) == value
+    """LUT_IPT_SEL[4] of a memory CLB at 0: so in every vendor build, its bit unknown."""
+    del rbb_x, lut_ipt_values
+    return rbb_row in _LUT_IPT_SEL_POS_BIT and signal == 'LUT_IPT_SEL[4]' and value == 0
 
 
 # ---------------------------------------------------------------------------

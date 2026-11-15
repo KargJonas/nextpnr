@@ -9,7 +9,8 @@ The uarch is on the branch `himbaechel-slg47910` of
 nextpnr; it builds its chipdb from the device database
 [Project-Inkwell/forgefpga](https://github.com/Project-Inkwell/forgefpga),
 whose files this repo makes: `graph.json` is `tools/gen_chipdb.py`'s
-`build/chipdb.json`, `hops.json` is `tools/vendor_hops.py`'s.
+`build/chipdb.json`, `hops.json` is `tools/vendor_hops.py`'s, and
+`timing.json` is `tools/kraken_timing.py`'s, from a Kraken export (below).
 
     make himbaechel-image FORGEFPGA=<forgefpga checkout>   # once
     make build/hb/blinky/bitstream_mcu.bin                 # designs/blinky through it
@@ -21,38 +22,123 @@ whole flow on any design; a pin file is the Viaduct's: `set_io <port> GPIO<n>`
 or `<row> <col>`, `set_clk <port> W0`. A design needs `clk_en` on `0 25`, or
 the on-chip oscillator does not run.
 
+## Timing
+
+The fabric's delays are the vendor's own: the placer's install carries them
+per condition (`sdf_dly/T40ULP/*.dly`), and Kraken reads them, checks them
+against the vendor's routes (to the picosecond on 9 314 of 9 323 routed
+resources) and exports them with the cells' arcs its builds state
+(Kraken's timing.md §8). `tools/kraken_timing.py <export.ndjson>
+<forgefpga>/slg47910/timing.json` makes the database's file: a delay class
+per pip -- its own and the wire's it drives -- and the bels' arcs fitted by
+hand to the logic units' (its docstring says how). The speed grades are the
+conditions builds were timed under, the default first; `-o speed=<grade>`
+picks another. Summed along the vendor's own routes the pips' delays are
+1.04 times the vendor's arrivals (the greater of rise and fall at every hop,
+where the vendor follows each edge).
+
+The Shrike at room temperature lies between the conditions, at about
+three-quarters of the slow one: of eleven placements of a 4x4 multiplier in
+the self-test wrapper (bist.py) the one nextpnr times at 27.9 ns under the
+slow condition fails at the oscillator's 20 ns and those at 26.9 ns and less
+pass (14.4 ns and 13.2 ns under the typical one); across the corpus the
+slowest passing design is timed at 25.4 ns, `mul5` fails at 28.4 and
+`sign_part_assign` at 33 (both pass at 80 ns a step). The vendor's own timing
+of its builds sits lower on the same silicon: of eleven vendor builds of
+multipliers in the wrapper, the one it times at 19.6 ns slow passes at 20 ns
+and those at 21.1 ns and more fail (2026-11-15), so its slow condition is
+about the Shrike's own speed, and nextpnr's delays from the export are about a
+third longer than the vendor's (where is not known: the pips agree along the
+vendor's routes, below). So the slow condition, the
+default, is a bound a design meets with a quarter to spare, and flow.sh asks
+nextpnr for the oscillator's 50 MHz under it without stopping at a miss
+(`--timing-allow-fail`): bist.py says SLOW for a design that then fails at
+speed and passes with four cycles to a step.
+
 ## What the chipdb and the uarch hold, and why not more
 
 Each limit is a thing the bitstream tools do not write yet. None is a silent
 wrong bit: the router is given no way to take what the tools would get wrong.
 
-- **LUT inputs I0-I3 only, a flip-flop's D from its slice's LUT only.** I4, I5
-  and a flip-flop's direct D come through the site's shared pins, whose
-  one-hot MUX_x5/x6/xI `emit_sdc.py` writes as a binary pin number. Synthesis
-  maps to four-input LUTs (`synth -lut 4`), and a flip-flop whose D is not
-  its own LUT's gets a buffer LUT.
-- **No carry chain, no memory, no MUXF, no second flip-flop of a slice, no
-  logic at the 40 memory sites.**
+- **The wide muxes:** a site's F7A (slice A's LUT or B's, selected by A's
+  XI), F7C (C or D, by C's XI) and F8 (F7A or F7C, by B's XI), as the
+  vendor's packer uses them (its MUXF records in `PNR_PACK_PLACE.log`), for
+  a netlist's MUXF7 and MUXF8: the uarch makes each MUXF8 or lone MUXF7 one
+  cluster with its LUTs. A mux leaves by its slice's xMUX pin (MUX_X's
+  EXTRA_IN, `AMX_SEL` 00001 at all 208 of the vendor's), true; its select
+  takes MUX_xI's XOR as a D from XI does. flow.sh does not make them: with
+  `abc -luts 2:2,3,6:5,10,20` (synth_xilinx's) a design's LUTs grew by half
+  (a BIST wrapper from 33 to 56) -- ABC's 7- and 8-input LUTs cost more LUT6
+  than its 6-input mapping saves.
+- **A slice's two LUTs.** The LUT6 is two LUT5 on its first five inputs;
+  with the sixth tied to 1 (`x6_TIE` 0, a bit the vendor names only in its
+  `*.vm`: it follows the name in all 55,532 slices of 797 builds) the slice's
+  output is the upper half and its xMUX pin the lower (MUX_X's OX0, as in
+  the vendor's 369 such slices), true. The uarch pairs two LUTs that share an
+  input and take five in all, rewritten onto the same five; the upper one may
+  keep its flip-flop, the lower one has none, and a pad's LUT is not paired.
+  Few pair in the regression designs (1 to 3 each): most of their LUTs take
+  six inputs or feed a flip-flop.
+- **No memory, no logic at the 40 memory sites.** In a memory site a
+  LUT's I4 pins do not complement what reaches them as elsewhere, and designs
+  placed there failed that passed without them: what else differs is not known.
+- **Each slice's second flip-flop (OXQ)** takes D from XI or the slice's first
+  flip-flop's Q (MUX_OXQ) and leaves by the xMUX pin only; its sync, polarity
+  and async bits (OxQsyncSRen, OxQpol, OQasyncSRen) follow the first one's.
+- **The carry chain** runs from slice A to D of a site and on to the next site
+  up its column (40 bits a column). Yosys maps adders and comparators to
+  `CARRY4` (`+/xilinx/arith_map.v`); the uarch makes each a bit per slice:
+  P from the slice's LUT, G from XI (a constant is MUX_xI's fifth input, a 1
+  its XOR inverts), the carry in at a chain's foot a constant (`CIN_SEL`) or,
+  from logic, the G of one more bit. The sum goes to the slice's flip-flop
+  (MUX_XQ) or out by the xMUX pin (MUX_X), as can the carry.
 - **Only the kinds of hop the vendor's router takes in its own builds**
   (the database's `hops.json`).
-- **Inversions are taken back in LUT tables.** A hop up a level-13 line
-  inverts, and so does a LUT's output wherever it leaves its site; a pad shows
-  the complement of what reaches it. `hb_emit.py` takes back an odd count at a
-  LUT's input in that LUT's table, and every output pad gets a LUT of its own,
-  whose table takes back the level-13 hops on the way to the pad. So only nets
-  that end at LUT inputs or at a pad may take a level-13 line; an enable or a
-  reset a LUT drives is taken back by MUX_CE / MUX_SR's XOR.
+- **Inversions are taken back where a net ends.** A hop up a level-13 line
+  inverts; a LUT's output arrives complemented at the pool and I5 pins, a
+  flip-flop's true; the I4 pins complement what reaches them; a pad shows the
+  complement of what reaches it, so every output pad gets a LUT of its own.
+  `hb_emit.py` counts each sink's inversions and takes an odd count back in a
+  LUT's table (an input, or a pad LUT's output), or in MUX_CE / MUX_SR / MUX_xI's
+  XOR (an enable, a reset, XI).
 - **Enables and resets come in by the I5 pins**, which share four feeders;
   MUX_CE / MUX_SR select the feeder one-hot, by its branch. A constant enable or
-  reset is selected in the site, not routed. Only a synchronous reset is known,
-  so Yosys makes every flip-flop one (`flow.sh`); an async clear or preset is
-  refused.
-- **At most two slices are used in one site** (`-o slices=N`): the input pool
-  nodes are shared between neighbouring sites, and without it no router finishes.
-- Pip delays are the graph's costs in ps, at least 100: congestion is priced by
-  delay. The cells have no timing and nextpnr runs `--no-tmdriv`: no Fmax.
+  reset is selected in the site, not routed. A site's flip-flops share one
+  set/reset, acting on the clock (FDRE, FDSE: xQsyncSRen) or at once (FDCE,
+  FDPE: the block's QasyncSRen). It always clears what a flip-flop holds; a
+  setting one holds its value inverted (xQpol 0 inverts its D), so it starts
+  at 1 and the sinks of its Q take the inversion back. A flip-flop with both a
+  set and a reset is refused.
+- A flip-flop's clock comes from a clock input (W0, N0, N1), one GCLK pip
+  from every site: the graph has no way from the fabric to a clock, so a
+  design with a second clock made in the fabric does not route (`muxtree`,
+  `process`, `omsp_dbg_uart` in the regression). Whether the vendor's placer
+  takes one is not known.
+- **At most two slices are used in one site** (`-o slices=N`), but where a
+  carry chain fills it: the input pool nodes are shared between neighbouring
+  sites, and without it no router finishes. Three did not help the designs
+  that two leaves unplaced (2026-11-15: `wreduce` placed and did not route). A slice holds a LUT with its own
+  flip-flop, or either alone: an unrelated LUT beside a flip-flop that takes D
+  from the fabric left 9 in 10 placements of a small ALU unroutable.
+- A row-31 pad's enable holds where the template rests it: on its pad's
+  first idle line, in every build that ran. With a net on that line the tools
+  move it to the next (as the vendor's do: 2 of 633 pads in its builds), and
+  what an idle level-5 line follows is not known: its template select opens
+  an input the graph does not have (82: lane 4 of `level5_down`), which the
+  vendor leaves in every idle one. On D5B0N0 at (20, 29) the enable held
+  (three pads); on D5B2N0 at (17, 28) two pads let go (`func_width_scope`),
+  and held again with that select cleared (66), or with the enable's mux on
+  another line -- not with the line's up-root or any level-13 line in use
+  taken off its net, and not with lane 5 (98) or lanes 4 and 5 open: the two
+  lanes stand where a level-13 branch 3 would be, which the graph lacks. Until that input is known route_bits.py refuses a
+  routing that moves an enable, and flow.sh takes the next seed (3 of 73
+  routings of the regression).
 
 ## On silicon (Shrike, 2026-11-13)
+
+- 2026-11-14, against simulation (bist.py): random 7- and 8-input functions
+  on 20 MUXF7 and 8 MUXF8, registered and not; LUT pairs (lower half out by
+  xMUX).
 
 - `designs/blinky` and 25-bit counters with routed clock enables: GPIO10 every
   334 ms, bit 12 at 6.1 kHz; counters of 3 to 25 bits, every bit at its rate.

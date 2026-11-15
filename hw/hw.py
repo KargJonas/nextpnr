@@ -19,7 +19,7 @@ import serial
 MCU_SIZE = 46408
 
 
-def flash(path, port="/dev/ttyACM0"):
+def flash_once(path, port="/dev/ttyACM0"):
     data = Path(path).read_bytes()
     if len(data) != MCU_SIZE:
         sys.exit(f"{path}: {len(data)} bytes, expected the {MCU_SIZE}-byte MCU format")
@@ -40,7 +40,9 @@ def flash(path, port="/dev/ttyACM0"):
                 break
             if not line:
                 sys.exit("no READY from firmware")
-        s.write(data)
+        # In pieces: one write of the whole image can stall the firmware's USB serial.
+        for i in range(0, len(data), 1024):
+            s.write(data[i:i + 1024]); s.flush(); time.sleep(0.002)
         config = None
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -52,6 +54,18 @@ def flash(path, port="/dev/ttyACM0"):
             if line.startswith("ERR"):
                 sys.exit(f"firmware: {line}")
         sys.exit("no OK from firmware")
+
+
+def flash(path):
+    """flash_once, again after a USB reset when the firmware's serial link stalls (it does, now and then)."""
+    for attempt in range(4):
+        try:
+            return flash_once(path)
+        except SystemExit as e:
+            if attempt == 3 or "firmware" not in str(e.code) or str(e.code).startswith("firmware: ERR"):
+                raise
+            subprocess.run(["usbreset", "2e8a:000a"], capture_output=True)
+            time.sleep(3)
 
 
 def capture(out, ms=2000, rate=1_000_000):

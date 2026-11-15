@@ -159,6 +159,11 @@ CLOCK_CORNER_TILE = (0, 31)
 CLOCK_CORNER_OUT_TILE = (1, 31)
 
 
+# The muxes that, idle, sit on a (1,'D') mux and on a level-5 line.
+IDLE_ON_LEVEL1 = ((0, "D"),)
+IDLE_ON_LEVEL5 = ((1, "D"), (3, "D"))
+
+
 def _corner_writes(g):
     """[(tile, key, value)] for the constant clock-corner SM net.
 
@@ -378,9 +383,31 @@ def emit_design(g, nets, bound_ports, input_tiles, timed=False, image=None,
             for (t, k, v) in _apparatus_writes(tile, False, None):
                 if (t, k) not in used and (k[0], k[1]) != (4, "D"):
                     writes.setdefault((t, k), v)
-    # (0,'D') siblings at a delivery tile keep the device template: the vendor's
-    # W0-clocked osc_probe leaves them there at both delivery tiles (the partner
-    # -lane rewrite read off single_ff/and_reg does not hold on it).
+    # idle (0,'D'), (1,'D') and (3,'D') muxes: one no net is routed through
+    # still selects a source, and whatever reads its wire sees that source's
+    # net -- an output pad's enable does (on silicon: a pad that let go whenever
+    # a counter bit ten tiles away was 0). The vendor leaves no idle mux on a
+    # wire in use: it takes the first of its sources, in the graph's order,
+    # that no net is on -- of its (1,'D') sources for a (0,'D'), of its level-5
+    # lines for the other two -- which is where the template has each (every
+    # one of 9,259 idle muxes the vendor moved in 100 of its builds, and none
+    # it did not). With every source in use it stays.
+    on_net = {g.sm_at(*t)[k].nid for (t, k) in used if g.sm_at(*t).get(k) is not None}
+    for nid in on_net:
+        level, direction = g.nodes[nid].key[:2]
+        if direction != "D" or level not in (1, 5):
+            continue
+        for m, _ in g.adj.get(nid, []):
+            if not g.is_sm(m) or m in on_net:
+                continue
+            mux = g.nodes[m]
+            if mux.key[:2] not in (IDLE_ON_LEVEL1 if level == 1 else IDLE_ON_LEVEL5) or mux.key not in sm_routing.SM_BL_WL:
+                continue
+            free = [g.nodes[p].key for p, _ in g.radj.get(m, [])
+                    if g.is_sm(p) and p not in on_net and g.nodes[p].key[:2] == (level, "D")]
+            if free:
+                writes.setdefault(((mux.x, mux.y), mux.key),
+                                  value_for(mux.key, free[0], timed, active=False))
 
     # -- 3. the constant clock-corner block.
     for (t, k, v) in _corner_writes(g):
