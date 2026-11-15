@@ -29,7 +29,7 @@ range, a division by zero, a constant x) are not folded: `left=` says how
 many. `fmax` is nextpnr's estimate after routing, in
 MHz: a pessimistic one (designs it puts at 37 run at 50).
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, signal, subprocess, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -186,10 +186,17 @@ def main():
 
     (out / "pins").write_text("set_clk clk W0\nset_io la[0] GPIO8\nset_io la[1] GPIO10\nset_io la[2] GPIO13\n"
                               "set_io clk_en 0 25\n")
+    # The flow in a process group of its own, stopped by SIGTERM: that reaches
+    # the container through podman (flow.sh runs it under an init), where a
+    # SIGKILL would leave the container running.
+    flow = subprocess.Popen([a.flow, str(out / "bist_top.v"), "bist_top", str(out / "pins"), str(out / "hb")],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        r = subprocess.run([a.flow, str(out / "bist_top.v"), "bist_top", str(out / "pins"),
-                            str(out / "hb")], capture_output=True, text=True, timeout=900)
+        r = subprocess.CompletedProcess(flow.args, 0, *flow.communicate(timeout=900))
+        r.returncode = flow.returncode
     except subprocess.TimeoutExpired:
+        os.killpg(flow.pid, signal.SIGTERM)
+        flow.communicate()
         print("BUILD-FAIL the flow took longer than 900 s"); return
     if r.returncode or not (out / "hb/bitstream_mcu.bin").exists():
         err = [l for l in (r.stdout + r.stderr).splitlines() if "ERROR" in l or "Error" in l] or (r.stdout + r.stderr).splitlines()[-1:]

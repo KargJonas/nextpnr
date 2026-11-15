@@ -40,6 +40,12 @@ timing.json is what slg47910_gen.py takes:
       O(3s+1).
   These are a first fit by hand of a bel model to the unit's arcs, not a
   rule's: they err late where the unit's arcs disagree.
+- `outputs`: the way out of a logic unit -- from its output port to the
+  first wire a net takes, the pin's delay and the wire's together -- per
+  class `out:<layer>/<type>/o<port>><wire>`, [min, max] per grade (null
+  where the grade has none): rule #34's, a `pip_class` of the export. The
+  vendor charges it to the net, a flip-flop's about 1.4 ns past its clock to
+  out, a LUT's about 0.4 ns; the units' arcs hold none of it.
 """
 import collections
 import json
@@ -49,7 +55,7 @@ import sys
 
 def main():
     export, out = sys.argv[1:]
-    timed, tiles, cells = set(), collections.defaultdict(dict), {}
+    timed, tiles, cells, ways_out = set(), collections.defaultdict(dict), {}, collections.defaultdict(dict)
     for line in open(export):
         record = json.loads(line)
         kind = record["kind"]
@@ -59,6 +65,8 @@ def main():
             tiles[record["grade"]][(record["x"], record["y"])] = record
         elif kind == "cell_timing":
             cells.setdefault(record["grade"], []).append(record)
+        elif kind == "pip_class" and record["name"].startswith("out:"):
+            ways_out[record["name"]][record["grade"]] = record["delay"][2:4]  # the slow corner: a named grade's both
     grades = [grade for grade in timed if grade in cells]
     if not grades:
         sys.exit("the export says no condition builds were timed under with cells' arcs: rule #33's claim does not stand")
@@ -86,9 +94,10 @@ def main():
         name: [[round(statistics.median(m[g][0] for m in of)), round(statistics.median(m[g][1] for m in of))] for g in grades]
         for name, of in members.items()
     }
-    json.dump({"grades": grades, "pips": pips, "classes": classes,
+    outputs = {name: [by.get(grade) for grade in grades] for name, by in ways_out.items()}
+    json.dump({"grades": grades, "pips": pips, "classes": classes, "outputs": outputs,
                "cells": {grade: bel_arcs(cells[grade]) for grade in grades}}, open(out, "w"))
-    print(f"{len(grades)} grade(s), {len(pips)} pips in {len(classes)} classes -> {out}")
+    print(f"{len(grades)} grade(s), {len(pips)} pips in {len(classes)} classes, {len(outputs)} ways out of a unit -> {out}")
 
 
 def bel_arcs(records):
