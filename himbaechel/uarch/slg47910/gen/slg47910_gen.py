@@ -119,11 +119,20 @@ def main():
     chip.set_speed_grades(grades)
     pip_class = timing["pips"]
 
+    # The way out of a logic site: from an output pin to the first wire a
+    # net takes, its delay as the vendor's routes show it (Kraken's rule #34,
+    # `out:<layer>/<type>/o<port>><wire>`, timing.json's `outputs`), the
+    # pin's own and the wire's together. The site's outputs are O26 on, port 0
+    # first.
+    outputs = timing["outputs"]
+    out_port = {p["node"]: int(p["name"][1:]) - 26 for s in sites if s["type"] == "L0" for p in s["pins"] if p["dir"] == "O"}
+
     def pip(tt, src, dst, kind, stated=None):
-        """A pip; `stated` the key of its delay in timing.json, where one is
-        stated: the others -- into and out of sites -- take none, the cells'
-        arcs holding the way to and from a site's pins."""
-        made = tt.create_pip(src, dst, pip_class.get(stated, "T0"))
+        """A pip; `stated` the key of its delay in timing.json -- a pip's,
+        or a way out of a site's -- where one is stated: the others -- into
+        sites, and inside them -- take none, the cells' arcs holding the way
+        to a site's pins."""
+        made = tt.create_pip(src, dst, pip_class.get(stated) or (stated if stated in outputs else "T0"))
         made.pip_type = chip.strs.id(kind)
 
     for w in db["wires"]:
@@ -151,7 +160,8 @@ def main():
             continue
         seen.add((p["src"], p["dst"]))
         d = wires[p["dst"]]
-        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], "PIP", f"{d['x']},{d['y']},{a['name']},{d['name']}")
+        stated = f"out:L/RBB_6L/o{out_port[p['src']]}>{d['name']}" if p["src"] in out_port else f"{d['x']},{d['y']},{a['name']},{d['name']}"
+        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], "PIP", stated)
 
     # The dedicated clock inputs, at (0, 0): the pad wire of each is a node
     # that every L0 site's CLK is one pip from.
@@ -301,6 +311,8 @@ def main():
         chip.timing.set_pip_class(grade, "T0", TimingValue(0))
         for name, by in timing["classes"].items():
             chip.timing.set_pip_class(grade, name, TimingValue(*by[i]))
+        for name, by in outputs.items():
+            chip.timing.set_pip_class(grade, name, TimingValue(*(by[i] or [0, 0])))
         cells(chip, grade, timing["cells"][grade])
 
     # Merge each node's aliases into it, its owner first.
