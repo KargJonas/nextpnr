@@ -906,20 +906,25 @@ def we_sel_to_bitstream(rbb_x, rbb_row, signal):
 
 
 def memory_clb_logic_bits(rbb_x, rbb_row):
-    """The RAM defaults a memory CLB used as plain logic must drop.
+    """The bits a memory CLB used as plain logic holds at 0.
 
-    The template holds BL4 WL26-30 of a memory CLB's tiles at a column-dependent
-    RAM default (11110 at columns 1/4/7/13, 11001 at 22/28, ...), where plain
-    rows hold 0. The vendor clears WL26-29 in the four corner tiles and WL30 in
-    the middle one whenever the CLB is plain logic (every such RBB of the
-    vendor corpus; WL30 of the corners is content). Left set, the site's
-    flip-flops stay dead: memory rows at columns 1/7/13 ran once cleared.
+    BL4 WL26-30 of its four corner tiles invert its slices' inputs I1-I5, a
+    tile a slice (eda-placer's FUN_0057cd90 writes them from a table it fills
+    with the polarity flag of the signal reaching each input, so that its
+    LUTs, logical as written, see each input true). At 0 a memory site takes
+    its inputs as a logic site does -- I1-I4 as they come, I5 complemented --
+    and hb_emit takes the polarity back in the LUT tables as it does there.
+    The template holds them at a column's idle values (11110 at columns
+    1-13, 00001, 00111 or 11001 beyond): left there, I5 came complemented in
+    some columns and not in others (mul5 failed, simple_multiplier, whose
+    I5 inputs were all in the second kind, passed). WL30 of the middle tile
+    is cleared in every plain-logic memory CLB of the vendor corpus.
     Returns (word_idx, bit) pairs to clear.
     """
     out = []
     for dx in (0, 1):
         for dy in (0, 2):
-            for wl in range(26, 30):
+            for wl in range(26, 31):
                 out.append(coords.trace_to_word_bit(rbb_row + dx, rbb_x + dy, 4, wl))
     out.append(coords.trace_to_word_bit(rbb_row + 1, rbb_x + 1, 4, 30))
     return out

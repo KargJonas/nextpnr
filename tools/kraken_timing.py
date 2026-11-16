@@ -30,7 +30,9 @@ timing.json is what slg47910_gen.py takes:
   delay and the flip-flop's setup together.
     - LUT: input k -> O, the least and greatest of I(6s+k) -> O(3s) over
       the slices (the delay to the unit's output pin: the internal paths
-      are taken as long, which errs late).
+      are taken as long, which errs late), of the logic layer's units (L).
+    - LUT_M: the same of the memory layer's (M): a LUT in a memory site is
+      slower as the vendor times it after routing.
     - CARRY: CI -> CO a quarter of I24 -> O12 (the chain through the four
       slices); P -> CO from I(0..3) -> O12 (slice A to the carry out),
       less slice A's LUT and three slices of chain; CI -> O from I24 ->
@@ -102,23 +104,18 @@ def main():
 
 def bel_arcs(records):
     """The bels' arcs, from the logic units' (`cell_timing` of `<layer>/RBB_6L`)."""
-    comb, outs = collections.defaultdict(list), collections.defaultdict(list)
-    for record in records:
-        if not record["name"].split(":")[0].endswith("/RBB_6L"):
-            continue
-        for arc in record["comb"]:
-            comb[(arc["from"], arc["to"])].append(arc["delay"])
-        for arc in record["clock_out"]:
-            outs[arc["pin"]].append(arc["delay"])
+    comb, outs = unit_arcs(records, "L")
+    memory, _ = unit_arcs(records, "M")
 
     def span(delays):
         """[least, greatest] of the slow corner's [min, max] of each."""
         return [min(d[2] for d in delays), max(d[3] for d in delays)] if delays else None
 
-    def arcs(pairs):
-        return span([d for pair in pairs for d in comb.get(pair, [])])
+    def arcs(pairs, of=comb):
+        return span([d for pair in pairs for d in of.get(pair, [])])
 
     lut = {k: arcs([(f"I{6 * s + k}", f"O{3 * s}") for s in range(4)]) for k in range(6)}
+    lut_m = {k: arcs([(f"I{6 * s + k}", f"O{3 * s}") for s in range(4)], memory) for k in range(6)}
     chain = span(comb[("I24", "O12")])
     step = [v / 4 for v in chain]
     a_to_co = arcs([(f"I{k}", "O12") for k in range(4)])
@@ -128,11 +125,25 @@ def bel_arcs(records):
     lut_most = max(lut[k][1] for k in range(4))
     return {
         "LUT": {f"I{k}": lut[k] for k in range(6) if lut[k]},
+        "LUT_M": {f"I{k}": lut_m[k] for k in range(6) if lut_m[k]},
         "CARRY": {"CI_CO": [round(v) for v in step], "P_CO": sorted(round(v) for v in p_to_co), "CI_O": [round(v) for v in ci_to_o]},
         "FF": {"CLK_Q": span([d for s in range(4) for d in outs.get(f"O{3 * s + 2}", [])]),
                "SETUP": [max(0, setup[0] - lut_most), max(0, setup[1] - lut_most)]},
         "OFF": {"CLK_Q": span([d for s in range(4) for d in outs.get(f"O{3 * s + 1}", [])])},
     }
+
+
+def unit_arcs(records, layer):
+    """The comb arcs and clock-to-outs of one layer's logic units, by pins."""
+    comb, outs = collections.defaultdict(list), collections.defaultdict(list)
+    for record in records:
+        if record["name"].split(":")[0] != f"{layer}/RBB_6L":
+            continue
+        for arc in record["comb"]:
+            comb[(arc["from"], arc["to"])].append(arc["delay"])
+        for arc in record["clock_out"]:
+            outs[arc["pin"]].append(arc["delay"])
+    return comb, outs
 
 
 if __name__ == "__main__":

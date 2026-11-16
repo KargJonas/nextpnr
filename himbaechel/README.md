@@ -79,12 +79,33 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   keep its flip-flop, the lower one has none, and a pad's LUT is not paired.
   Few pair in the regression designs (1 to 3 each): most of their LUTs take
   six inputs or feed a flip-flop.
-- **No memory, no logic at the 40 memory sites.** In a memory site a
-  LUT's I4 pins do not complement what reaches them as elsewhere, and designs
-  placed there failed that passed without them: what else differs is not known.
-- **Each slice's second flip-flop (OXQ)** takes D from XI or the slice's first
-  flip-flop's Q (MUX_OXQ) and leaves by the xMUX pin only; its sync, polarity
-  and async bits (OxQsyncSRen, OxQpol, OQasyncSRen) follow the first one's.
+- **Logic, but no memory, at the 40 memory sites.** A memory site has five
+  bits a slice that invert its inputs I1-I5 (BL4 WL26-30 of the slice's
+  corner tile). The vendor's LUT tables are logical, and its placer
+  (`FUN_0057cd90`) sets each bit to the polarity of the signal reaching the
+  input. `pack.py` holds them at 0, where a memory site takes its inputs as a
+  logic site does, and `hb_emit.py` takes the polarity back in the LUT tables
+  as it does there. Left at the template's idle values, I5 came complemented
+  in some columns and not in others. On silicon (2026-11-16):
+  `simple_multiplier` with 15 LUTs in memory sites passes at speed, and `mul5`
+  with 34 passes with four cycles to a step. The memory sites' LUTs are
+  0.4-1.1 ns slower than the logic sites' in the vendor's timing, which the
+  uarch does not know yet.
+- **Each slice's second flip-flop (OXQ)** takes D from XI, the slice's first
+  flip-flop's Q or the slice's lower half (MUX_OXQ's OX0, the vendor's OAQ_SEL
+  100, which it uses for 329 of its 645 second flip-flops, mostly a buffer)
+  and leaves by the xMUX pin only; its sync, polarity and async bits
+  (OxQsyncSRen, OxQpol, OQasyncSRen) follow the first one's. The packer does
+  not yet put a flip-flop behind a lower half.
+- **`mul6`-`mul8` do not route** (2026-11-16): the router stays at 20-30
+  overused wires, the input pools' D1 and D0 nodes of a dense column (a D1
+  node feeds the four D0 nodes of a tile, each in another slice's pool, so
+  neighbouring sites compete for them). Not the synthesis: the vendor's own
+  netlist of `mul8s` does not route under our placement either. Not the
+  graph: the vendor's routes of it take only kinds of hop the chipdb has. Not
+  the flip-flops' D on XI: taking it through a LUT of its own instead, as the
+  vendor's packer does, changed nothing. The vendor packs about 3.3 LUTs a
+  site and routes; what its placement does that ours does not is open.
 - **The carry chain** runs from slice A to D of a site and on to the next site
   up its column (40 bits a column). Yosys maps adders and comparators to
   `CARRY4` (`+/xilinx/arith_map.v`); the uarch makes each a bit per slice:

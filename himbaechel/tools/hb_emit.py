@@ -60,9 +60,11 @@ def main():
             muxes.setdefault((c["sx"], c["sy"], c["slice"]), {})["amx_sel"] = 1 << bit
     # A slice's lower half leaves by its xMUX pin as MUX_X's OX0 (the vendor's
     # AMX_SEL 00100, slice D 0010, in all 369 slices of its builds that pair LUTs).
+    # Not where the slice's second flip-flop leaves by it: then the lower half
+    # feeds that flip-flop (MUX_OXQ's OX0) and nothing else.
     for lut in placement["luts"]:
         if "lower" in lut:
-            muxes.setdefault((lut["sx"], lut["sy"], lut["slice"]), {})["amx_sel"] = 4 if lut["slice"] < 3 else 2
+            muxes.setdefault((lut["sx"], lut["sy"], lut["slice"]), {}).setdefault("amx_sel", 4 if lut["slice"] < 3 else 2)
     # A wide mux (F7A, F8, F7C) leaves by its slice's xMUX pin as MUX_X's EXTRA_IN
     # (the vendor's AMX_SEL 00001 at every one of 208 in its builds).
     for m in placement["muxfs"]:
@@ -128,6 +130,8 @@ def main():
                 checked.append(dst)
                 # The I4 pins complement what reaches them (on silicon): there a
                 # flip-flop's output arrives inverted and a LUT's arrives true.
+                # A memory site's do too: pack.py clears the bits that would
+                # invert its inputs (memory_clb_logic_bits).
                 x, y, slice_, k = (int(v) for v in m.groups())
                 if (from_lut + (k == 4) + u13_hops(parent, dst)) % 2:
                     lut = luts_at[(x, y, slice_)]
