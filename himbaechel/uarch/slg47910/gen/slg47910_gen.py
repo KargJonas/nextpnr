@@ -42,6 +42,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../.."))
 from himbaechel_dbgen.chip import BEL_FLAG_GLOBAL, Chip, ClockEdge, NodeWire, PinType, TimingValue
 
 
+# A bel of a memory site's logic (slg47910.cc reads it).
+BEL_FLAG_MEMORY = 0x100
+
+
 def cells(chip, grade, arcs):
     """The bels' arcs under one grade, as timing.json fits them to the units'."""
     value = lambda pair: TimingValue(pair[0], pair[1])
@@ -54,6 +58,14 @@ def cells(chip, grade, arcs):
     for pin, delay in arcs["LUT"].items():
         if pin != "I5":
             lower.add_comb_arc(pin, "O", value(delay))
+    # A LUT in a memory site, as the vendor times it after routing: the uarch
+    # takes these for a LUT placed there (BEL_FLAG_MEMORY).
+    lut_m = chip.timing.add_cell_variant(grade, "SLG_LUT_M")
+    lower_m = chip.timing.add_cell_variant(grade, "SLG_LUTL_M")
+    for pin, delay in arcs["LUT_M"].items():
+        lut_m.add_comb_arc(pin, "O", value(delay))
+        if pin != "I5":
+            lower_m.add_comb_arc(pin, "O", value(delay))
     carry = chip.timing.add_cell_variant(grade, "SLG_CARRY")
     c = arcs["CARRY"]
     carry.add_comb_arc("CI", "CO", value(c["CI_CO"]))
@@ -174,12 +186,13 @@ def main():
         tt0.add_bel_pin(bel, "PAD", wire, PinType.OUTPUT)
         clock_pads[token] = wire
 
+    # Every logic site, those of the memory rows too: a memory site used as
+    # logic is a logic site (its own way into its I4 pins is the bitstream
+    # tools').
+    site_at = {(s["sx"], s["sy"]): (s["x"], s["y"]) for s in sites if s["type"] == "L0"}
     memory = {(s["x"], s["y"]) for s in db["sites"] if s["type"] == "L1"}
-    site_at = {(s["sx"], s["sy"]): (s["x"], s["y"]) for s in sites if s["type"] == "L0" and (s["x"], s["y"]) not in memory}
     for s in sites:
         x, y = s["x"], s["y"]
-        if s["type"] == "L0" and (x, y) in memory:
-            continue
         tt = by_tile[(x, y)]
         pins = {p["name"]: p for p in s["pins"]}
         ins = [p["node"] for p in s["pins"] if p["dir"] == "I"]
@@ -229,6 +242,8 @@ def main():
             for j in range(4):
                 pip(tt, local(x, y, pins[f"I{j * 6 + 5}"]["node"]), xi, "MUX")
             lut = tt.create_bel(f"LUT{sl}", "SLG_LUT", z=sl)
+            if (x, y) in memory:
+                lut.flags |= BEL_FLAG_MEMORY
             tt.add_bel_pin(lut, "O", luto, PinType.OUTPUT)
             for k in range(6):
                 li = f"LUTI{sl}_{k}"
@@ -245,6 +260,8 @@ def main():
             # (x6_TIE 0) the LUT is the upper half, and the lower half a LUT of
             # its own, out by the slice's xMUX pin (MUX_X's OX0).
             lower = tt.create_bel(f"LUTL{sl}", "SLG_LUTL", z=20 + sl)
+            if (x, y) in memory:
+                lower.flags |= BEL_FLAG_MEMORY
             tt.create_wire(f"LUTLO{sl}", "LUTLO")
             tt.add_bel_pin(lower, "O", f"LUTLO{sl}", PinType.OUTPUT)
             for k in range(5):
@@ -274,7 +291,9 @@ def main():
             tt.add_bel_pin(off, "Q", offq, PinType.OUTPUT)
             for pin, wire in (("CLK", "CLK"), ("CE", "CE"), ("R", "SR")):
                 tt.add_bel_pin(off, pin, wire, PinType.INPUT)
-            for w in (xi, ffq):
+            # MUX_OXQ: XI, the first flip-flop's Q, or the lower half (OX0, the
+            # vendor's OAQ_SEL 100: 329 of its 645 second flip-flops).
+            for w in (xi, ffq, f"LUTLO{sl}"):
                 pip(tt, w, offd, "FFDMUX")
             pip(tt, offq, local(x, y, pins[f"O{27 + 3 * sl}"]["node"]), "XMUX")
             carry = tt.create_bel(f"CARRY{sl}", "SLG_CARRY", z=8 + sl)

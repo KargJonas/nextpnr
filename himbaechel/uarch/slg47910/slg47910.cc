@@ -22,7 +22,7 @@
  *              (hb_emit.py) turn into the graph's node ids and the sites'
  *              coordinates
  *
- * Not yet: the memory sites.
+ * The memory sites are logic sites here: no LUT RAM yet.
  */
 
 #include <algorithm>
@@ -129,6 +129,8 @@ struct SlgImpl : HimbaechelAPI
         h.init(ctx);
         HimbaechelAPI::init(ctx);
         slices = ctx->args.options.count("slices") ? ctx->args.options.at("slices").as<int>() : 2;
+        lut_m = ctx->get_cell_timing_idx(id_SLG_LUT_M);
+        lutl_m = ctx->get_cell_timing_idx(id_SLG_LUTL_M);
         // The site each site's carry out goes on to: the far end of its CARRY pip.
         for (BelId bel : ctx->getBels()) {
             if (ctx->getBelType(bel) != id_SLG_CARRY || ctx->getBelLocation(bel).z != CARRY_Z + 3)
@@ -844,6 +846,8 @@ struct SlgImpl : HimbaechelAPI
         auto pairable = [&](CellInfo *c) {
             if (c->type != id_SLG_LUT || !own_ff_only(c) || inputs(c).empty() || inputs(c).size() > 5)
                 return false;
+            if (c->attrs.count(ctx->id("BEL")))
+                return false; // placed by the user where it is: not moved into a pair
             const NetInfo *out = c->getPort(id_O);
             if (out == nullptr || out->users.entries() == 0)
                 return false;
@@ -966,6 +970,22 @@ struct SlgImpl : HimbaechelAPI
     bool isValidBelForCellType(IdString cell_type, BelId bel) const override
     {
         return ctx->getBelType(bel) == cell_type;
+    }
+
+    // ---- timing ----
+
+    // A bel of a memory site's logic (gen/slg47910_gen.py's BEL_FLAG_MEMORY).
+    static constexpr uint32_t BEL_FLAG_MEMORY = 0x100;
+    int lut_m = -1, lutl_m = -1;
+
+    // A LUT placed in a memory site takes the memory layer's arcs: the vendor
+    // times its LUTs 0.4-1.1 ns slower after routing (timing.json's LUT_M).
+    bool getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const override
+    {
+        if (cell->bel != BelId() && (cell->type == id_SLG_LUT || cell->type == id_SLG_LUTL) &&
+            (chip_bel_info(ctx->chip_info, cell->bel).flags & BEL_FLAG_MEMORY))
+            return ctx->lookup_cell_delay(cell->type == id_SLG_LUT ? lut_m : lutl_m, fromPort, toPort, delay);
+        return HimbaechelAPI::getCellDelay(cell, fromPort, toPort, delay);
     }
     IdString getBelBucketForCellType(IdString cell_type) const override { return cell_type; }
 
@@ -1211,11 +1231,12 @@ struct SlgImpl : HimbaechelAPI
             // The one-hot select of what drives D. MUX_XQ (aq1_sel): the slice's
             // LUT (X_RAW, the vendor's default), the carry's sum (S_BIT) or XI;
             // slice D drops EXTRA_IN, so its bits sit one lower. MUX_OXQ
-            // (oaq_sel) of a second flip-flop: XI or the first flip-flop's Q.
+            // (oaq_sel) of a second flip-flop: XI, the first flip-flop's Q or the
+            // lower half (OX0).
             WireId src = uphill_bound(ctx->getBelPinWire(ci->bel, id_D));
             IdString from = src != WireId() ? ctx->getWireType(src) : IdString();
             if (loc.z >= OFF_Z)
-                f << ",\"oaq_sel\":" << (from == ctx->id("FFQ") ? 2 : 1) << "}";
+                f << ",\"oaq_sel\":" << (from == ctx->id("FFQ") ? 2 : from == id_LUTLO ? 4 : 1) << "}";
             else {
                 int abc_bit = from == id_LUTO ? 5 : from == id_CYO ? 4 : 1;
                 int field_bit = (loc.z % 4 == 3) ? abc_bit - 1 : abc_bit;
