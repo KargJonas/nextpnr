@@ -599,17 +599,19 @@ def control_pad(iob):
 
 
 def derive_edge_iob_output_muxes(iob):
-    """Return the recovered edge-output mux tuple for one routed side-edge IOB."""
+    """The selects of an edge output's MUX_O0, MUX_O1 and the shared MUX_SR / MUX_CE."""
     gx = int(iob.get('gx', -1))
     gy = int(iob.get('gy', -1))
     net = iob.get('net', '')
 
     # East-edge IOBs (gx=31): O0 selects the D0 branch the data came through
-    # (branch k -> one-hot 1<<k, as on the west edge). The output enable is a
-    # constant that route_bits routes to nothing, so O1/SR/CE must not name a
-    # fabric branch: the vendor sets them to A, and to B when O0 itself is A
-    # (read from its builds of one probe on every row-31 pad; with both on A
-    # the pad sits static high).
+    # (branch k -> one-hot 1<<k, as on the west edge), O1 the one the enable
+    # came through when the design drives it, and SR/CE, which no route drives,
+    # the lowest branch neither takes: A, or B when the data is on A (read from
+    # the vendor's builds of one probe on every row-31 pad; with both on A the
+    # pad sits static high), as control_pad does (and the vendor's build of a
+    # driven enable on GPIO11, design set inout). An enable held at 1 is routed
+    # to nothing: O1 then takes SR/CE's branch.
     if gx == 31:
         if net in ('$PACKER_GND', '$PACKER_VCC'):
             raise UnsupportedBackendFeature(
@@ -619,7 +621,9 @@ def derive_edge_iob_output_muxes(iob):
             raise UnsupportedBackendFeature(
                 f"east-edge IOB at (31,{gy}) has no pad_in_d0_branch in placement"
             )
-        return 1 << data_branch, 2 if data_branch == 0 else 1
+        oe_branch = int(iob.get('oe_d0_branch', -1)) if iob.get('oe_net') else -1
+        shared = 1 << min(set(range(4)) - {data_branch, oe_branch})
+        return 1 << data_branch, 1 << oe_branch if oe_branch >= 0 else shared, shared
 
     branch = int(iob.get('pad_in_d0_branch', -1))
     o0 = _EDGE_IOB_OUTPUT_O0_BY_D0_BRANCH.get(branch)
@@ -629,7 +633,9 @@ def derive_edge_iob_output_muxes(iob):
             f"edge output IOB at ({gx},{gy}) uses unsupported "
             f"terminal D0 branch {branch}"
         )
-    return o0, shared
+    if iob.get('oe_net'):
+        raise UnsupportedBackendFeature(f"a driven enable on edge pad ({gx},{gy}) is RE-backed on row 31 only")
+    return o0, shared, shared
 
 
 def derive_edge_iob_output_nvm_bits(iob):
@@ -641,7 +647,9 @@ def derive_edge_iob_output_nvm_bits(iob):
     # Fabric-driven outputs on the row-31 pads (the vendor's RBB_31_<col>; the
     # IOB is at graph (col, 31)). Read from the vendor placer's own builds of
     # one probe on each pad (Kraken harness eda-placer, design set pads):
-    #   own tile   bl7 wl1 = 0   enables the output driver
+    #   own tile   bl7 wl1 = 0   holds the enable at 1; 1 takes the enable
+    #                            the design drives (design set inout: as bl8
+    #                            wl1 for the data, it passes the pad's register)
     #              bl8 wl1 = 1   bypasses the IOB's output flip-flop (template)
     #              bl4 wl26 = the clock domain the output is retimed on (the
     #                         vendor's build of counters on W0 and W1: 1 for
@@ -659,8 +667,11 @@ def derive_edge_iob_output_nvm_bits(iob):
             raise UnsupportedBackendFeature(
                 f"east-edge output at (31,{gy}) is not RE-backed (GPIO8-18 are)")
         et, ebl = _EAST_PAD_ENABLE_TILE[gy]
-        lane4 = [(14, 0)] if derive_edge_iob_output_muxes(iob)[1] == 1 else [(22, 1), (30, 0)]
-        return ([(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
+        shared = derive_edge_iob_output_muxes(iob)[2]
+        if shared not in (1, 2):
+            raise UnsupportedBackendFeature(f"east-edge output at (31,{gy}): data and enable on A and B")
+        lane4 = [(14, 0)] if shared == 1 else [(22, 1), (30, 0)]
+        return ([(*_word_bit(gy, 31, 7, 1), int(bool(iob.get('oe_net')))), (*_word_bit(gy, 31, 8, 1), 1),
                  (*_word_bit(gy, 31, 4, 26), int(iob['domain'])), (*_word_bit(et, 31, ebl, 25), 0)] +
                 [(*_word_bit(et, 31, ebl, wl), v) for wl, v in lane4])
 
@@ -1297,14 +1308,9 @@ def emit_sdc(placement, out_file):
             gy = int(iob.get('gy', -1))
             direction = iob.get('dir', 'inout')
 
-            if direction == 'inout':
-                raise UnsupportedBackendFeature(
-                    f"IOB at ({gx},{gy}) uses bidirectional PAD mode, which is not yet RE-backed"
-                )
-
-            # What the pad reads (input 0, by O4) and what the chip states at it.
-            reads = [0] if direction == 'input' and iob.get('pad_out_pin', -1) >= 0 else []
-            for k in reads + [int(k) for k in iob.get('status', [])]:
+            # The pad's inputs the fabric reads: what the pad reads (input 0)
+            # and what the chip states at it.
+            for k in iob.get('inputs', []):
                 for reg, bit, value in input_bits(gx, gy, k):
                     emit_direct_nvm_bit(f, reg, bit, value)
 
@@ -1340,11 +1346,11 @@ def emit_sdc(placement, out_file):
                 continue
 
             prefix = f"TILE_00/RBB_{gx}_{gy}"
-            mux_o0, shared = derive_edge_iob_output_muxes(iob)
+            mux_o0, mux_o1, shared = derive_edge_iob_output_muxes(iob)
             # The output mux selects the D0 branch the data was routed through;
             # route_bits programs the fabric up to that D0 node, not this mux.
             emit_mux_sel(f, prefix, "MUX_O0", mux_o0, 4)
-            emit_mux_sel(f, prefix, "MUX_O1", shared, 4)
+            emit_mux_sel(f, prefix, "MUX_O1", mux_o1, 4)
             emit_mux_sel(f, prefix, "MUX_SR", shared, 4)
             emit_mux_sel(f, prefix, "MUX_CE", shared, 4)
 

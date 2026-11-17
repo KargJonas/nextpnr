@@ -65,13 +65,22 @@ with it, and OSC_READY reads 1; straight to a pad, through a LUT and through a
 flip-flop. The encoding was read from Kraken's vendor builds of design set
 `status`: each input read alone, both, through a LUT and through a flip-flop.
 
-A GPIO the design reads is its pad's first input, by the same way: the pad's
-O4 pin, and the same bit at the pad's place (WL16, at the tile and BL its
-enable has). Kraken's vendor builds of design set `gpioall` (each of eight
-reading a random half of the pads) give it for every GPIO pad but GPIO8. On
-the Shrike GPIO6 reads its pull-up, as the vendor's image of the same design
-does. No other pad has been read on silicon: the analyser's pins are inputs
-too.
+A GPIO the design reads is its pad's first input, by the same way (the IOB's
+IN0, which leaves by the pad's O4) and the same bit at the pad's place (WL16,
+at the tile and BL its enable has). Kraken's vendor builds of design set
+`gpioall` (each of eight reading a random half of the pads) give it for every
+GPIO pad but GPIO8. On the Shrike GPIO6 reads its pull-up, as the vendor's
+image of the same design does.
+
+A pad the design both drives and reads is an `inout` port driven by a
+tristate buffer (`assign p = oe ? d : 1'bz`; the flow keeps one that drives a
+port, `tribuf -logic`): one IOB, the data on PAD, the enable on OE and the
+read on IN0. An enable the design drives passes the pad's register as the data
+does (BL7 WL1 1, where 0 holds the enable at 1), and MUX_O1 takes the branch it
+arrives by (Kraken's design set `inout`: GPIO11 driven, read, both, each with
+its enable held and driven). On the Shrike GPIO11 drives while its enable is
+high, floats to its pull-up while it is low, and reads back what the pad holds
+either way. Row 31 only: the other edges' driven enable is not read yet.
 
 ## Timing
 
