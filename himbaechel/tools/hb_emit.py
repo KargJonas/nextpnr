@@ -74,7 +74,8 @@ def main():
                                 for (sx, sy, sl), m in muxes.items()]
     for iob in placement["iobs"]:
         branch = re.search(r"D0B(\d+)N", iob["pad_in_sm"])
-        iob.update(pad_in_d0_branch=int(branch.group(1)) if branch else -1, oe_pin=-1, oe_sm="", oe_d0_branch=-1)
+        oe = re.search(r"D0B(\d+)N", iob.get("oe_sm", ""))
+        iob.update(pad_in_d0_branch=int(branch.group(1)) if branch else -1, oe_d0_branch=int(oe.group(1)) if oe else -1)
     routing = json.load(open(routing_in))
     for net in routing["nets"]:
         net["name"] = constant.get(net["name"], net["name"])
@@ -151,7 +152,7 @@ def main():
             elif re.fullmatch(r"X\d+Y\d+/(CE|SR|XI\d)", dst):
                 checked.append(dst)
                 control[dst] = (from_lut + u13_hops(parent, dst)) % 2
-            elif dst.endswith("/PAD") and u13_hops(parent, dst) % 2:
+            elif re.search(r"/(PAD|OE)$", dst) and u13_hops(parent, dst) % 2:
                 lut = luts_at[tuple(int(v) for v in drivers[0].groups())]
                 n = max([i for i, pin in enumerate(lut["pins"]) if pin >= 0], default=-1) + 1
                 lut["init"] ^= (1 << (1 << n)) - 1 if n else (1 << 64) - 1

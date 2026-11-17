@@ -150,10 +150,15 @@ _CLOCK_MUX_DEFAULTS = {
     9: [0, 1, 1, 0],
 }
 
+# (token, domain) -> the mux that feeds the domain and its selects. W1 is the
+# PLL, and W0 on domain 1 is the oscillator beside it (vendor builds of a
+# counter on W in1, and of one on W in0 and one on W in1, 2026-11-17).
 _CLOCK_SOURCE_MUX_BITS = {
-    "W0": (8, [0, 0, 0, 0]),
-    "N0": (8, [0, 0, 1, 0]),
-    "N1": (9, [1, 0, 1, 0]),
+    ("W0", 0): (8, [0, 0, 0, 0]),
+    ("W0", 1): (9, [0, 0, 0, 0]),
+    ("W1", 0): (8, [1, 0, 0, 0]),
+    ("N0", 0): (8, [0, 0, 1, 0]),
+    ("N1", 1): (9, [1, 0, 1, 0]),
 }
 
 # Route-aware side-edge IOB output emission.
@@ -518,6 +523,42 @@ def emit_direct_nvm_bit(f, reg, bit, value):
         f.write(f"set_case_analysis {value} TILE_00/RAW_W{reg}_B{bit}\n")
 
 
+def held_control_bits(held):
+    """The bits of a chip control (the PLL's) a pad holds at a constant.
+
+    Read from the vendor placer's builds of a counter on the PLL, each with one
+    control bit flipped (Kraken harness eda-placer, design set pll, 2026-11-17):
+    in the pad's own tile, an output held at a constant clears BL8 WL1 (output
+    0) or BL7 WL1 (output 1), and its value is held inverted in BL9 at WL6
+    (output 0) or WL13 (output 1; WL14 on row 31). The template holds 1 there:
+    0 on every control. On silicon the PLL then runs at 50 MHz x FBDIV / REFDIV
+    / (POSTDIV1 x POSTDIV2), to 0.05 %."""
+    x, y, out, value = (int(held[k]) for k in ('x', 'y', 'out', 'value'))
+    return [(*_word_bit(x, y, 8 - out, 1), 0),
+            (*_word_bit(x, y, 9, 6 if out == 0 else 14 if y == 31 else 13), 1 - value)]
+
+
+def control_pad(iob):
+    """The muxes and bits of a pad that carries chip controls the design drives.
+
+    A pad's four muxes each pick one of its four inputs (one-hot A..D, the D0
+    branch a route arrives by): MUX_O0 the first output's, MUX_O1 the
+    second's, and MUX_CE and MUX_SR, as the output a route does not drive, the
+    lowest branch neither takes (the vendor's build of the PLL's controls each
+    driven, 2026-11-17, on all 14 of its pads). A driven output clears its in-use bit
+    as a held one does (BL8 WL1, BL7 WL1); its value comes complemented, as a
+    GPIO's does, and its LUT takes that back."""
+    gx, gy = int(iob['gx']), int(iob['gy'])   # RBB_<gx>_<gy>: the pad's tile is (gy, gx)
+    branches = [int(iob.get('pad_in_d0_branch', -1)) if iob.get('net') else -1,
+                int(iob.get('oe_d0_branch', -1)) if iob.get('oe_net') else -1]
+    free = min(set(range(4)) - set(branches))
+    muxes = {"MUX_O0": 1 << (branches[0] if branches[0] >= 0 else free),
+             "MUX_O1": 1 << (branches[1] if branches[1] >= 0 else free),
+             "MUX_CE": 1 << free, "MUX_SR": 1 << free}
+    bits = [(*_word_bit(gy, gx, 8 - out, 1), 0) for out in (0, 1) if branches[out] >= 0]
+    return muxes, bits
+
+
 def derive_edge_iob_output_muxes(iob):
     """Return the recovered edge-output mux tuple for one routed side-edge IOB."""
     gx = int(iob.get('gx', -1))
@@ -563,7 +604,11 @@ def derive_edge_iob_output_nvm_bits(iob):
     # one probe on each pad (Kraken harness eda-placer, design set pads):
     #   own tile   bl7 wl1 = 0   enables the output driver
     #              bl8 wl1 = 1   bypasses the IOB's output flip-flop (template)
-    #              bl4 wl26 = 0
+    #              bl4 wl26 = the clock domain the output is retimed on (the
+    #                         vendor's build of counters on W0 and W1: 1 for
+    #                         the pads behind domain-1 flip-flops; on silicon
+    #                         a pad on the other domain stops while its clock
+    #                         does, 2026-11-17)
     #   enable tile bl9|10, the "lane 4" of the three shared muxes and wl25:
     #              shared A: wl14 = 0      shared B: wl22 = 1, wl30 = 0
     #              wl25 = 0 either way
@@ -577,7 +622,7 @@ def derive_edge_iob_output_nvm_bits(iob):
         et, ebl = _EAST_PAD_ENABLE_TILE[gy]
         lane4 = [(14, 0)] if derive_edge_iob_output_muxes(iob)[1] == 1 else [(22, 1), (30, 0)]
         return ([(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
-                 (*_word_bit(gy, 31, 4, 26), 0), (*_word_bit(et, 31, ebl, 25), 0)] +
+                 (*_word_bit(gy, 31, 4, 26), int(iob['domain'])), (*_word_bit(et, 31, ebl, 25), 0)] +
                 [(*_word_bit(et, 31, ebl, wl), v) for wl, v in lane4])
 
     # West IOB constant outputs ($PACKER_GND / $PACKER_VCC): the
@@ -674,17 +719,10 @@ def collect_clock_sources(placement):
         token = clock.get('token', '')
         if not token:
             continue
-        observed = _CLOCK_SOURCE_MUX_BITS.get(token)
-        if observed is None:
+        domain = int(clock.get('domain', 0))
+        if (token, domain) not in _CLOCK_SOURCE_MUX_BITS:
             raise UnsupportedBackendFeature(
-                f"unsupported dedicated clock token {token!r} in placement data"
-            )
-        expected_domain = 0 if token in ('W0', 'N0') else 1
-        domain = int(clock.get('domain', expected_domain))
-        if domain != expected_domain:
-            raise UnsupportedBackendFeature(
-                f"clock source {token!r} reports domain {domain}, expected {expected_domain}"
-            )
+                f"clock source {token!r} on domain {domain} is not known")
         current = sources.get(domain)
         if current is not None:
             same_net = current.get('net', '') == clock.get('net', '')
@@ -824,7 +862,7 @@ def emit_sdc(placement, out_file):
         mux_bits[8] = _CLOCK_MUX_DEFAULTS[8][:]
         mux_bits[9] = _CLOCK_MUX_DEFAULTS[9][:]
         for clock in clock_sources.values():
-            mux_idx, bits = _CLOCK_SOURCE_MUX_BITS[clock['token']]
+            mux_idx, bits = _CLOCK_SOURCE_MUX_BITS[(clock['token'], int(clock.get('domain', 0)))]
             mux_bits[mux_idx] = bits[:]
         for mux_idx in range(10):
             bits = mux_bits[mux_idx]
@@ -1202,6 +1240,10 @@ def emit_sdc(placement, out_file):
             if rbb_x % 6 == 1:
                 emit_direct_nvm_bit(f, *_word_bit(rbb_y + 1, rbb_x + 1, 10, 31), 0)
 
+        for held in placement.get('held_controls', []):
+            for reg, bit, value in held_control_bits(held):
+                emit_direct_nvm_bit(f, reg, bit, value)
+
         # --- Side-/north-edge IOB outputs ---
         # These use a different route-aware mux scheme than CLB rows. The
         # recovered mapping is keyed by the terminal D0 branch feeding the L6
@@ -1217,6 +1259,14 @@ def emit_sdc(placement, out_file):
                 )
 
             if direction != 'output':
+                continue
+
+            if iob.get('control'):
+                muxes, bits = control_pad(iob)
+                for mux, value in muxes.items():
+                    emit_mux_sel(f, f"TILE_00/RBB_{gx}_{gy}", mux, value, 4)
+                for reg, bit, value in bits:
+                    emit_direct_nvm_bit(f, reg, bit, value)
                 continue
 
             if gx not in (0, 31) and gy != 31:

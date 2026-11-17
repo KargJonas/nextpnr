@@ -19,8 +19,38 @@ whose files this repo makes: `graph.json` is `tools/gen_chipdb.py`'s
 `tools/hb_emit.py` turns nextpnr's names into the node ids and site
 coordinates the bitstream tools take. `flow.sh <design.v> <top> <pins> <dir>` runs the
 whole flow on any design; a pin file is the Viaduct's: `set_io <port> GPIO<n>`
-or `<row> <col>`, `set_clk <port> W0`. A design needs `clk_en` on `0 25`, or
-the on-chip oscillator does not run.
+or `<row> <col>`, `set_clk <port> W0|W1|N0|N1`. A design needs `clk_en` on
+`0 25` (or `OSC_CTRL_EN`), or the on-chip oscillator does not run.
+
+## The PLL
+
+The PLL is the vendor's (app note AN-FG-006): the fabric drives its controls
+through pads, and its clock comes in at W1. A design names them as the vendor's
+does, ports set in the pin file by the controls' own names:
+
+    set_clk pll_clk W1
+    set_io  OSC_CTRL_EN OSC_CTRL_EN
+    set_io  PLL_CTRL_EN PLL_CTRL_EN                 # and PLL_CTRL_BYPASS, PLL_REF_CLK_SELECTION
+    set_io  PLL_CTRL_FBDIV[0] PLL_CTRL_FBDIV[0]     # ... [11]; REFDIV [0..5], POSTDIV1/2 [0..2]
+
+and runs at 50 MHz x FBDIV / REFDIV / (POSTDIV1 x POSTDIV2) (on the Shrike to
+0.1 %: FBDIV 16..544, REFDIV 1..32, POSTDIVs 2..7 measured, VCO 335 to 1405
+MHz, the reference down to 1.6 MHz). BYPASS passes the reference through; REF_CLK_SELECTION 1 takes it from
+GPIO2. A control held at a constant takes no LUT and no route: the pad holds it
+in its own bits. One the design drives is routed to the pad's first or second
+output (the second is the bel's OE pin) through a LUT of its own; BYPASS acts
+at once, the dividers when EN rises. The vendor's builds the encoding was read
+from are Kraken's (design set `pll`: a counter on the PLL, each control bit
+flipped once, all driven from logic, and the oscillator and the PLL together).
+
+Two clock domains feed the sites: clock mux 8 (W0, W1 or N0) and mux 9 (N1, or
+W0). With the PLL or N0 on the first, the oscillator moves to the second, as in
+the vendor's build of a design on both. A row-31 pad's output passes a
+register on one of the two domains: the uarch puts it on the domain of the
+flip-flops behind the pad (domain 1 when they are of both, as the vendor
+does). On the other domain it would stop whenever that clock does: the PLL's
+while EN is low. N0 and N1 are mapped from the vendor's builds only; no
+vendor design says what drives them on the Shrike, so neither has run on it.
 
 ## Timing
 
@@ -53,7 +83,10 @@ vendor's routes, below). So the slow condition, the
 default, is a bound a design meets with a quarter to spare, and flow.sh asks
 nextpnr for the oscillator's 50 MHz under it without stopping at a miss
 (`--timing-allow-fail`): bist.py says SLOW for a design that then fails at
-speed and passes with four cycles to a step.
+speed and passes on the PLL at 12.5 MHz. Its earlier way, inputs that step
+every fourth cycle, held only the inputs: a register behind an enable kept what
+a path too long for one cycle latched at the first edge, so `dynslice` and
+designs like it failed however slowly they stepped (2026-11-17).
 
 ## What the chipdb and the uarch hold, and why not more
 
@@ -130,7 +163,7 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   setting one holds its value inverted (xQpol 0 inverts its D), so it starts
   at 1 and the sinks of its Q take the inversion back. A flip-flop with both a
   set and a reset is refused.
-- A flip-flop's clock comes from a clock input (W0, N0, N1), one GCLK pip
+- A flip-flop's clock comes from a clock input (W0, W1, N0, N1), one GCLK pip
   from every site: the graph has no way from the fabric to a clock, so a
   design with a second clock made in the fabric does not route (`muxtree`,
   `process`, `omsp_dbg_uart` in the regression). Whether the vendor's placer

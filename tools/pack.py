@@ -617,11 +617,23 @@ def direct_nvm_to_bitstream(signal):
 # Bitstream positions (verified across 4+ design pairs):
 #   CLK_8_0_SEL → word 5912 (x=16, y=25, pos=5), bit 17, not inverted
 #   CLK_8_2_SEL → word 5934 (x=16, y=27, pos=5), bit 19, not inverted
+#
+# CLK_9 feeds clock domain 1, the oscillator's when the PLL (W1) takes domain
+# 0: then CLK_9 = {0,0,0,0} (the vendor's build of a counter on each,
+# 2026-11-17), and of its template {0,1,1,0} these two bits clear:
+#   CLK_9_1_SEL → word 5923 (x=16, y=26, pos=5), bit 12
+#   CLK_9_2_SEL → word 5934 (x=16, y=27, pos=5), bit 12
+# (select k in row 25 + k, as CLK_8's). N1 on domain 1 is CLK_9 = {1,0,1,0},
+# setting the third (all three vendor builds of make_multiclk, W0 and N1):
+#   CLK_9_0_SEL → word 5912 (x=16, y=25, pos=5), bit 14
 
 # Map from SDC signal name to (word_idx, bit, inverted)
 _CLK_MUX_MAP = {
     "CLK_8_0_SEL": (5912, 17, False),
     "CLK_8_2_SEL": (5934, 19, False),
+    "CLK_9_0_SEL": (5912, 14, False),
+    "CLK_9_1_SEL": (5923, 12, False),
+    "CLK_9_2_SEL": (5934, 12, False),
 }
 
 # Signals that are always at template defaults — mark as handled

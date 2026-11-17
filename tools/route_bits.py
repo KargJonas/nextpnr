@@ -13,7 +13,9 @@ the vendor placer, turns the hops into bits on the device template.
 
 On top of the routed nets goes the clock entry: the fixed bits the vendor
 writes for a design clocked from W0 (the 50 MHz oscillator, datasheet
-Table 10), whatever the design and wherever its flip-flops sit.
+Table 10), whatever the design and wherever its flip-flops sit -- but for the
+selects of clock mux 8, which say which input that is (W0, W1 the PLL, N0):
+the SDC's (emit_sdc's CLK_8_*_SEL), so a route leaves them at the template.
 """
 
 import argparse
@@ -34,9 +36,12 @@ N_SM = 40960                         # ids below this are SM mux nodes
 CONSTANT_NETS = {"$PACKER_GND", "$PACKER_VCC"}
 
 
+CLOCK_SELECTS = {(5912, 17), (5934, 19)}   # CLK_8_0_SEL, CLK_8_2_SEL (pack.py _CLK_MUX_MAP)
+
+
 def load_clock_entry():
-    """[(word, bit, value)] the vendor writes for a W0-clocked design."""
-    return [tuple(x) for x in json.loads((DB / "clock_w0.json").read_text())]
+    """[(word, bit, value)] the vendor writes for a W0-clocked design, but the input's selects."""
+    return [tuple(x) for x in json.loads((DB / "clock_w0.json").read_text()) if tuple(x[:2]) not in CLOCK_SELECTS]
 
 
 def net_hops(g, pips, exit_select):
@@ -171,11 +176,17 @@ def followed_enables(g, routing, virtual, words):
         return [p for p, _ in g.radj.get(nid, []) if g.is_sm(p)
                 and sm_emit.value_for(node.key, g.nodes[p].key, False, tval=held, active=True) == held]
 
+    # A pad whose second output a net drives (a chip control's, the PLL's) has
+    # no enable to hold: that output is data, routed as the first is.
+    driven_oe = {virtual[b][:-len("/OE")] for net in routing["nets"]
+                 for _a, b in net["pips"] if virtual.get(b, "").endswith("/OE")}
     out = []
     for net in routing["nets"]:
         parent = {b: a for a, b in net["pips"]}
         for a, b in net["pips"]:
             if not virtual.get(b, "").endswith("/PAD") or parent.get(a, N_SM) >= N_SM:
+                continue
+            if virtual[b][:-len("/PAD")] in driven_oe:
                 continue
             data = g.nodes[parent[a]].key[2]
             enable = next(m for m, _ in g.radj[a] if g.is_sm(m) and g.nodes[m].key[2] == (1 if data == 0 else 0))

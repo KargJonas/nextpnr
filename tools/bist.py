@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a design on the Shrike and check it against simulation, with no I/O.
 
-    bist.py <design.v> <top> <build dir> [--cycles N] [--from N] [--bits HI:LO] [--no-hw] [--flow flow.sh]
+    bist.py <design.v> <top> <build dir> [--cycles N] [--from N] [--bits HI:LO] [--mhz F] [--no-hw] [--flow flow.sh]
 
 The design is wrapped: an LFSR drives every input (a reset input is held
 active for the first 16 cycles, and comes from a flip-flop), every output is folded into a 32-bit
@@ -10,7 +10,8 @@ reset, what a flip-flop starts at no longer counts), and after N cycles the
 wrapper compares the
 signature with the one Yosys's simulation of the same wrapper gives (`sim
 -zinit`: every register starts at 0, as on the chip). The wrapper runs on
-the 50 MHz oscillator and shows on the logic analyser:
+the 50 MHz oscillator, or with --mhz on the PLL at that frequency (as near as
+its dividers come), and shows on the logic analyser:
 
     GPIO8  (D0)  a heartbeat, bit 20 of the cycle count
     GPIO10 (D2)  done: N cycles have run -- bit 18 of the count once they have
@@ -20,8 +21,8 @@ Done and pass toggle rather than hold: a pad that is not driven reads its
 pull-up, a constant 1.
 
 Prints one line: PASS, FAIL (wrong signature), SLOW (wrong signature at 50
-MHz, the simulation's with four cycles to a step: the design's paths are too
-long for the oscillator, as built), DEAD (no heartbeat, never done, or a pad
+MHz, the simulation's on the PLL at a quarter of it: the design's paths are
+too long for the oscillator, as built), DEAD (no heartbeat, never done, or a pad
 that holds 1), UNDEFINED (the simulation leaves every output bit x at some time), or
 BUILD-FAIL with the flow's last error. Output bits the simulation leaves x
 at some time (Verilog lets the chip hold anything there: an index out of
@@ -67,7 +68,29 @@ def ports(src, top, out):
     return top, plist
 
 
-def wrapper(top, plist, cycles, golden, start=0, only=None, slow=0, left=(), record=False):
+def pll(mhz):
+    """The PLL's dividers for a clock of `mhz`: 50 MHz x FBDIV / REFDIV / (POSTDIV1 x
+    POSTDIV2), the nearest to it, its VCO (50 x FBDIV / REFDIV) between 335 and 1405
+    MHz (the range seen locking on the Shrike) and nearest 800 among equals."""
+    best = None
+    for ref in range(1, 8):
+        for fb in range(16, 401):
+            vco = 50 * fb / ref
+            if not 335 <= vco <= 1405:
+                continue
+            for p1 in range(1, 8):
+                for p2 in range(1, p1 + 1):
+                    key = (abs(vco / (p1 * p2) - mhz), abs(vco - 800))
+                    if best is None or key < best[0]:
+                        best = (key, dict(PLL_CTRL_FBDIV=fb, PLL_CTRL_REFDIV=ref, PLL_CTRL_POSTDIV1=p1, PLL_CTRL_POSTDIV2=p2))
+    return best[1]
+
+
+PLL_PORTS = [("PLL_CTRL_EN", 1), ("PLL_CTRL_BYPASS", 1), ("PLL_REF_CLK_SELECTION", 1), ("PLL_CTRL_FBDIV", 12),
+             ("PLL_CTRL_REFDIV", 6), ("PLL_CTRL_POSTDIV1", 3), ("PLL_CTRL_POSTDIV2", 3)]
+
+
+def wrapper(top, plist, cycles, golden, start=0, only=None, left=(), record=False, dividers=None):
     ins = [(n, w) for n, d, w in plist if d == "input" and not CLOCKS.match(n)]
     outs = [(n, w) for n, d, w in plist if d == "output"]
     clocks = [n for n, d, w in plist if d == "input" and CLOCKS.match(n)]
@@ -76,7 +99,8 @@ def wrapper(top, plist, cycles, golden, start=0, only=None, slow=0, left=(), rec
     # compares set and clear: a comparison of n against a constant is a carry
     # chain, and a carry chain fills its site.
     width = max(21, (cycles + 1).bit_length())
-    lines = [f"module bist_top(input wire clk, output wire [2:0] la, output wire clk_en);",
+    controls = "".join(f", output wire [{w - 1}:0] {n}" for n, w in PLL_PORTS) if dividers else ""
+    lines = [f"module bist_top(input wire clk, output wire [2:0] la, output wire clk_en{controls});",
              "    reg [31:0] lfsr = 32'h1;", "    reg [31:0] misr = 0;", f"    reg [{width - 1}:0] n = 0;",
              f"    reg done = 0, pass = 0, early = 1, on = {int(start == 0)};"]
     conns, bit = [], 0
@@ -115,23 +139,24 @@ def wrapper(top, plist, cycles, golden, start=0, only=None, slow=0, left=(), rec
         lines.append(f"    (* keep *) reg [{max(total, 1) - 1}:0] undef = 0;")
     fold = " ^ ".join(f"{{{{{32 - min(32, total - k)}{{1'b0}}}}, flat[{min(total, k + 32) - 1}:{k}]}}"
                       if min(32, total - k) < 32 else f"flat[{k + 31}:{k}]" for k in range(0, max(total, 1), 32))
-    # --slow K: the inputs step, and the signature takes the outputs, every 2^K
-    # cycles only: a design with no flip-flops of its own then has that long.
-    tick = f"(&n[{slow - 1}:0])" if slow else "1'b1"
     lines += [f"    wire [31:0] fold = {fold};",
               "    always @(posedge clk) begin",
-              f"        if ({tick}) lfsr <= {{lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]}};",
+              "        lfsr <= {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]};",
               "        n <= n + 1'b1;",
               "        if (n == 14) early <= 1'b0;",
               f"        if (n == {start - 1} && !done) on <= 1'b1;" if start else "",
               f"        if (n == {cycles - 1}) on <= 1'b0;",
-              f"        if ({tick} && on) misr <= {{misr[30:0], misr[31] ^ misr[21] ^ misr[1] ^ misr[0]}} ^ fold;",
+              "        if (on) misr <= {misr[30:0], misr[31] ^ misr[21] ^ misr[1] ^ misr[0]} ^ fold;",
               f"        if (n == {cycles}) begin done <= 1'b1; pass <= (misr == 32'h{golden:08x}); end",
               "    end"]
     if record:
-        lines.append(f"    always @(posedge clk) if ({tick} && on) undef <= undef | (flat ^ flat);")
+        lines.append("    always @(posedge clk) if (on) undef <= undef | (flat ^ flat);")
     lines += ["    assign la = {pass & n[19], done & n[18], n[20]};",
-              "    assign clk_en = 1'b1;",
+              "    assign clk_en = 1'b1;"]
+    if dividers:
+        held = {"PLL_CTRL_EN": 1, "PLL_CTRL_BYPASS": 0, "PLL_REF_CLK_SELECTION": 0, **dividers}
+        lines += [f"    assign {n} = {w}'d{held[n]};" for n, w in PLL_PORTS]
+    lines += [
               "endmodule"]
     return "\n".join(lines) + "\n"
 
@@ -142,7 +167,7 @@ def main():
     ap.add_argument("--cycles", type=int, default=65536)
     ap.add_argument("--from", dest="start", type=int, default=0)
     ap.add_argument("--bits", help="fold only outputs HI:LO (of all outputs side by side, the last port lowest)")
-    ap.add_argument("--slow", type=int, default=0, help="step the inputs and the signature every 2^K cycles")
+    ap.add_argument("--mhz", type=float, default=50, help="the clock: the oscillator's 50 MHz, or the PLL's")
     ap.add_argument("--no-hw", action="store_true")
     ap.add_argument("--flow", default=str(REPO / "himbaechel/flow.sh"))
     a = ap.parse_args()
@@ -159,7 +184,7 @@ def main():
         asynchronous reset as a mux on the flip-flop's output, so that its
         release is seen at the edge after, as on the chip (sim lets a
         flip-flop see a reset that falls at the same edge)."""
-        (out / "bist_sim.v").write_text(wrapper(top, plist, a.cycles, 0, a.start, a.bits, a.slow, left, True))
+        (out / "bist_sim.v").write_text(wrapper(top, plist, a.cycles, 0, a.start, a.bits, left, True))
         # The vendor-neutral cells a design may instantiate (LUT5, FDRE, ...) as Yosys models them.
         r = podman(f"yosys -q -p 'read_verilog +/xilinx/cells_sim.v; read_verilog -sv {src} bist_sim.v; hierarchy -top bist_top; proc; flatten; memory; opt_clean; async2sync; "
                    f"sim -clock clk -zinit -n {a.cycles + 2} -w; write_json sim.json'", out)
@@ -182,15 +207,21 @@ def main():
         print("UNDEFINED the simulation leaves every output bit x at some time: nothing to compare with"); return
     golden = int(misr, 2)
     note = f" left={len(left)}/{bits}" if left else ""  # bits left out: x in simulation
-    (out / "bist_top.v").write_text(open(src).read() + "\n" + wrapper(top, plist, a.cycles, golden, a.start, a.bits, a.slow, left))
-
-    (out / "pins").write_text("set_clk clk W0\nset_io la[0] GPIO8\nset_io la[1] GPIO10\nset_io la[2] GPIO13\n"
-                              "set_io clk_en 0 25\n")
+    dividers = pll(a.mhz) if a.mhz != 50 else None
+    mhz = 50 * dividers["PLL_CTRL_FBDIV"] / dividers["PLL_CTRL_REFDIV"] / dividers["PLL_CTRL_POSTDIV1"] / dividers["PLL_CTRL_POSTDIV2"] if dividers else 50
+    (out / "bist_top.v").write_text(open(src).read() + "\n" + wrapper(top, plist, a.cycles, golden, a.start, a.bits, left,
+                                                                     dividers=dividers))
+    pins = (f"set_clk clk {'W1' if dividers else 'W0'}\nset_io la[0] GPIO8\nset_io la[1] GPIO10\nset_io la[2] GPIO13\n"
+            "set_io clk_en OSC_CTRL_EN\n")
+    for n, w in PLL_PORTS if dividers else []:
+        pins += "".join(f"set_io {n}[{k}] {n}[{k}]\n" if w > 1 else f"set_io {n} {n}\n" for k in range(w))
+    (out / "pins").write_text(pins)
     # The flow in a process group of its own, stopped by SIGTERM: that reaches
     # the container through podman (flow.sh runs it under an init), where a
     # SIGKILL would leave the container running.
     flow = subprocess.Popen([a.flow, str(out / "bist_top.v"), "bist_top", str(out / "pins"), str(out / "hb")],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                            env={**os.environ, "FREQ": f"{mhz:.3f}"})
     try:
         r = subprocess.CompletedProcess(flow.args, 0, *flow.communicate(timeout=900))
         r.returncode = flow.returncode
@@ -205,8 +236,9 @@ def main():
     fmax = re.findall(r"Max frequency for clock 'clk': ([\d.]+) MHz", open(out / "hb/nextpnr.log").read())[-1]
     if a.no_hw:
         print(f"BUILT luts={luts} golden={golden:08x} fmax={fmax}{note}"); return
+    # 200 ms at 50 MHz: ten heartbeats; as many at a slower clock
     r = subprocess.run([sys.executable, str(REPO / "hw/hw.py"), "ab", str(out / "hb/bitstream_mcu.bin"),
-                        "--rate", "1000000", "--ms", "200"], capture_output=True, text=True, cwd=REPO)
+                        "--rate", "1000000", "--ms", str(int(200 * 50 / mhz))], capture_output=True, text=True, cwd=REPO)
     final, edges = {"!": None, "#": None, "&": None}, {"!": 0, "#": 0, "&": 0}
     for line in open(out / "hb/bitstream_mcu.vcd"):
         if line.startswith("#"):
@@ -219,15 +251,15 @@ def main():
         print(f"PASS luts={luts} golden={golden:08x} fmax={fmax}{note}")
     else:
         # A wrong signature is a wrong design or one too slow for the clock:
-        # with four cycles to a step (--slow 2) only the second still fails.
+        # on the PLL at a quarter of it only the first still fails.
         again = ""
-        if not a.slow:
+        if a.mhz == 50:
             r = subprocess.run([sys.executable, __file__, str(src), a.top, str(out / "slow"), "--cycles", str(a.cycles),
-                                "--from", str(a.start), "--slow", "2", "--flow", a.flow]
+                                "--from", str(a.start), "--mhz", "12.5", "--flow", a.flow]
                                + (["--bits", a.bits] if a.bits else []), capture_output=True, text=True)
-            again = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "?"
+            again = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else (r.stderr.strip().splitlines() or ["?"])[-1]
         print(f"{'SLOW' if again.startswith('PASS') else 'FAIL'} luts={luts} golden={golden:08x} fmax={fmax}{note}"
-              + (f" (four cycles to a step: {again})" if again else ""))
+              + (f" (at 12.5 MHz: {again})" if again else ""))
 
 
 if __name__ == "__main__":
