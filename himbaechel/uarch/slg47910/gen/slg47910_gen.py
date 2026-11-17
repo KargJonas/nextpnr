@@ -23,9 +23,9 @@ between nodes. It is a flat graph, so the chipdb is a thin layer over it:
   * the site's wide muxes: MUXF7 (A or B, C or D) and MUXF8 (of the two);
   * the carry chain runs from slice A to D of a site and on, by a dedicated
     pip, to slice A of the next site up its column (the vendor's CIN/COUT);
-  * the four dedicated clock inputs (W0 the oscillator, W1 the PLL, N0, N1)
-    are bels at (0, 0) whose pad wire reaches every L0 site's CLK through one
-    GCLK pip.
+  * the dedicated clock inputs (W0 the oscillator, W1 the PLL, N0, N1, and
+    E0, E1 that take back a clock the fabric makes) are bels at (0, 0) whose
+    pad wire reaches every L0 site's CLK through one GCLK pip.
   * a pip into a line an output pad's enable rests on (graph.json's `rest`)
     has the type `REST:x,y;...`, the pads whose it is.
 
@@ -187,9 +187,10 @@ def main():
         pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], kind, stated)
 
     # The dedicated clock inputs, at (0, 0): the pad wire of each is a node
-    # that every L0 site's CLK is one pip from.
+    # that every L0 site's CLK is one pip from. E0 and E1 take back what the
+    # fabric sends out at pad (31,11) (logic as clock, app note AN-FG-019).
     tt0 = by_tile[(0, 0)]
-    for z, (token, _d) in enumerate([("W0", 0), ("N0", 0), ("N1", 1), ("W1", 0)]):
+    for z, (token, _d) in enumerate([("W0", 0), ("N0", 0), ("N1", 1), ("W1", 0), ("E0", 1), ("E1", 1)]):
         wire = f"CLKPAD_{token}"
         tt0.create_wire(wire, "CLKPAD")
         bel = tt0.create_bel(f"CLKIN_{token}", "SLG_CLKIN", z=100 + z)
@@ -215,10 +216,17 @@ def main():
             # or the second of the chip controls a pad carries (the PLL's).
             tt.create_wire("OE", "OE")
             tt.add_bel_pin(bel, "OE", "OE", PinType.INPUT)
+            # What the chip states at a pad of its own (PLL_LOCK, OSC_READY),
+            # by the pad's input it names: the vendor's Input=0 leaves by O4,
+            # Input=1 by O5 (its routes of them, AN-FG-019's pads).
+            for k in range(2):
+                tt.create_wire(f"IN{k}", "IN")
+                tt.add_bel_pin(bel, f"IN{k}", f"IN{k}", PinType.OUTPUT)
             for p in s["pins"]:
                 w = local(x, y, p["node"])
                 if p["dir"] == "O":
                     pip(tt, "PAD", w, "IOPAD")
+                    pip(tt, f"IN{int(p['name'][1:]) - 4}", w, "IOPAD")
                 else:
                     pip(tt, w, "PAD", "IOPAD")
                     pip(tt, w, "OE", "IOPAD")
