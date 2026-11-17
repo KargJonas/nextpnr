@@ -3,15 +3,16 @@
  *
  * The chipdb (slg47910_gen.py) is the vendor's routing graph with the 140 L0
  * logic sites (four slices of a LUT6, two flip-flops and a bit of the carry
- * chain), the 184 L6 pads and the three dedicated clock inputs as bels. This file is what
- * nextpnr does with it:
+ * chain), the 184 L6 pads and the four dedicated clock inputs as bels. This
+ * file is what nextpnr does with it:
  *
- *   pack       pads and clock inputs from the ports and a pin file, the
- *              synthesiser's LUTs and flip-flops as SLG_LUT and SLG_FF, a LUT
- *              with its single flip-flop as one cluster, constants as LUTs,
- *              CARRY4 chains as one cluster of carry bits up a column, a
- *              MUXF7 or a MUXF8 as one cluster with the LUTs it takes,
- *              two LUTs of five inputs in all as one slice's two halves
+ *   pack       pads, clock inputs and the PLL's controls from the ports and a
+ *              pin file, the synthesiser's LUTs and flip-flops as SLG_LUT and
+ *              SLG_FF, a LUT with its single flip-flop as one cluster,
+ *              constants as LUTs, CARRY4 chains as one cluster of carry bits
+ *              up a column, a MUXF7 or a MUXF8 as one cluster with the LUTs
+ *              it takes, two LUTs of five inputs in all as one slice's two
+ *              halves
  *   validity   the flip-flops of a site share one enable and one reset; a
  *              site's four I5 pins bring in at most four nets; as many
  *              slices of a site in use as the design needs (two while its
@@ -57,7 +58,7 @@ constexpr int MUXF_Z = 16;   // the site's F7A, F7C and F8 (gen)
 constexpr int LUTL_Z = 20;   // a slice's lower half, a LUT of its own
 // The slice whose XI selects each wide mux, and whose xMUX pin it leaves by.
 constexpr int MUXF_SLICE[3] = {0, 2, 1};
-constexpr int CLKIN_Z = 100; // W0, N0, N1
+constexpr int CLKIN_Z = 100; // W0, N0, N1, W1
 
 // The package's pads: GPIO name -> the vendor's name for its IOB, RBB_<row>_<col>.
 const std::map<std::string, std::pair<int, int>> &gpio_names()
@@ -71,6 +72,35 @@ const std::map<std::string, std::pair<int, int>> &gpio_names()
     return t;
 }
 
+// The chip's own inputs the fabric drives through a pad's two outputs, by the
+// vendor's names (its io planner's, app note AN-FG-006): the PLL's controls ->
+// RBB_<row>_<col> and which output. The oscillator's enable, OSC_CTRL_EN, is
+// a pad of its own, (0,25).
+struct Control
+{
+    int row, col, out;
+};
+const std::map<std::string, Control> &control_names()
+{
+    static const std::map<std::string, Control> t = [] {
+        std::map<std::string, Control> m = {{"PLL_REF_CLK_SELECTION", {0, 11, 0}},
+                                            {"PLL_CTRL_BYPASS", {0, 11, 1}},
+                                            {"PLL_CTRL_EN", {0, 18, 0}},
+                                            {"PLL_CTRL_POSTDIV1[0]", {0, 19, 0}},
+                                            {"PLL_CTRL_POSTDIV1[1]", {0, 19, 1}},
+                                            {"PLL_CTRL_POSTDIV1[2]", {0, 20, 0}},
+                                            {"PLL_CTRL_POSTDIV2[0]", {0, 20, 1}},
+                                            {"PLL_CTRL_POSTDIV2[1]", {0, 21, 0}},
+                                            {"PLL_CTRL_POSTDIV2[2]", {0, 21, 1}}};
+        for (int k = 0; k < 12; k++)
+            m["PLL_CTRL_FBDIV[" + std::to_string(k) + "]"] = {0, 12 + k / 2, k % 2};
+        for (int k = 0; k < 6; k++)
+            m["PLL_CTRL_REFDIV[" + std::to_string(k) + "]"] = {31, 19 + k / 2, k % 2};
+        return m;
+    }();
+    return t;
+}
+
 struct ClockToken
 {
     int z, domain;
@@ -78,7 +108,7 @@ struct ClockToken
 };
 const std::map<std::string, ClockToken> &clock_tokens()
 {
-    static const std::map<std::string, ClockToken> t = {{"W0", {0, 0, "W"}}, {"N0", {1, 0, "N"}}, {"N1", {2, 1, "N"}}};
+    static const std::map<std::string, ClockToken> t = {{"W0", {0, 0, "W"}}, {"N0", {1, 0, "N"}}, {"N1", {2, 1, "N"}}, {"W1", {3, 0, "W"}}};
     return t;
 }
 
@@ -104,7 +134,7 @@ struct SlgImpl : HimbaechelAPI
     {
         po::options_description specific("SLG47910 specific options");
         specific.add_options()("pins", po::value<std::string>(),
-                               "pin file: `set_io <port> GPIO<n>|<row> <col>`, `set_clk <port> W0|N0|N1`");
+                               "pin file: `set_io <port> GPIO<n>|<row> <col>|OSC_CTRL_EN|<PLL control>`, `set_clk <port> W0|W1|N0|N1`");
         specific.add_options()("speed", po::value<std::string>(),
                                "the speed grade, a condition the vendor times under (its builds' when not given)");
         specific.add_options()("placement", po::value<std::string>(), "where to write the placement, as JSON");
@@ -170,6 +200,13 @@ struct SlgImpl : HimbaechelAPI
 
     std::map<std::string, BelId> io_bels;
     std::map<std::string, std::string> clock_ports; // port -> token
+    std::map<std::string, Control> control_ports;    // port -> the chip input it drives
+    struct Held
+    {
+        int x, y, out, value;
+    };
+    std::vector<Held> held_controls; // a control held at a constant: the pad holds it, nothing routes
+    std::map<std::pair<int, int>, CellInfo *> control_cells; // (row, col) -> the pad cell of driven controls
 
     BelId iob_at(int row, int col, const std::string &where)
     {
@@ -190,7 +227,7 @@ struct SlgImpl : HimbaechelAPI
             log_error("slg47910: cannot open the pin file %s\n", path.c_str());
         std::string line;
         int lineno = 0;
-        std::set<std::pair<int, int>> taken;
+        std::set<std::tuple<int, int, int>> taken; // (row, col, output): -1 a whole pad
         while (std::getline(f, line)) {
             lineno++;
             line = line.substr(0, line.find('#'));
@@ -205,12 +242,22 @@ struct SlgImpl : HimbaechelAPI
                 c = toupper(c);
             if (keyword == "set_clk") {
                 if (!clock_tokens().count(where))
-                    log_error("slg47910: %s: no clock input %s (W0, N0 or N1)\n", at.c_str(), where.c_str());
+                    log_error("slg47910: %s: no clock input %s (W0, W1, N0 or N1)\n", at.c_str(), where.c_str());
                 clock_ports[port] = where;
             } else if (keyword == "set_io") {
                 int row, col;
                 auto gpio = gpio_names().find(where);
-                if (gpio != gpio_names().end())
+                auto control = control_names().find(where);
+                if (control != control_names().end()) {
+                    const Control &c = control->second;
+                    if (!taken.insert({c.row, c.col, c.out}).second || taken.count({c.row, c.col, -1}))
+                        log_error("slg47910: %s: %s taken twice\n", at.c_str(), where.c_str());
+                    control_ports[port] = c;
+                    continue;
+                }
+                if (where == "OSC_CTRL_EN")
+                    row = 0, col = 25;
+                else if (gpio != gpio_names().end())
                     row = gpio->second.first, col = gpio->second.second;
                 else {
                     char *end = nullptr;
@@ -219,12 +266,26 @@ struct SlgImpl : HimbaechelAPI
                         log_error("slg47910: %s: %s is no GPIO name, nor a row and a column\n", at.c_str(),
                                   where.c_str());
                 }
-                if (!taken.insert({row, col}).second)
+                if (!taken.insert({row, col, -1}).second || taken.count({row, col, 0}) || taken.count({row, col, 1}))
                     log_error("slg47910: %s: pad (%d,%d) taken twice\n", at.c_str(), row, col);
                 io_bels[port] = iob_at(row, col, at);
             } else
                 log_error("slg47910: %s: expected set_io or set_clk\n", at.c_str());
         }
+    }
+
+    // The two clock domains: mux 8 feeds domain 0 (W0, W1 or N0), mux 9 domain
+    // 1 (N1, or W0). The oscillator moves to domain 1 when the PLL or N0 takes
+    // domain 0, as the vendor's build of a design on both W0 and W1 has it.
+    int clock_domain(const std::string &token)
+    {
+        std::set<std::string> used;
+        for (auto &[port, t] : clock_ports)
+            used.insert(t);
+        bool zero = used.count("W1") || used.count("N0");
+        if ((used.count("W1") && used.count("N0")) || (zero && used.count("W0") && used.count("N1")))
+            log_error("slg47910: more clock inputs than the two clock domains hold\n");
+        return token == "W0" && zero ? 1 : clock_tokens().at(token).domain;
     }
 
     void pack_io()
@@ -245,6 +306,35 @@ struct SlgImpl : HimbaechelAPI
             std::string pname = name.str(ctx);
             if (!port.net)
                 continue;
+            if (control_ports.count(pname)) {
+                // A control held at a constant is the pad's to hold (its own
+                // bits, as the vendor writes them): no cell, no route. One the
+                // design drives is routed to the pad's first output (PAD) or
+                // its second (OE); the two of a pad are one cell.
+                const CellInfo *driver = port.net->driver.cell;
+                bool vcc = driver && driver->type == ctx->id("VCC"), gnd = driver && driver->type == ctx->id("GND");
+                if (port.type != PORT_OUT)
+                    log_error("slg47910: %s drives a chip control: it must be an output\n", pname.c_str());
+                const Control &c = control_ports.at(pname);
+                used.insert(pname);
+                if (vcc || gnd) {
+                    held_controls.push_back({c.col, c.row, c.out, vcc ? 1 : 0});
+                    continue;
+                }
+                CellInfo *&pad = control_cells[{c.row, c.col}];
+                if (pad == nullptr) {
+                    auto cell =
+                            std::make_unique<CellInfo>(ctx, ctx->idf("$ctl_%d_%d", c.row, c.col), id_SLG_IOB);
+                    cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(iob_at(c.row, c.col, pname)));
+                    cell->attrs[ctx->id("CONTROL")] = Property(1);
+                    pad = cell.get();
+                    made.push_back(std::move(cell));
+                }
+                IdString pin = c.out ? id_OE : id_PAD;
+                pad->addInput(pin);
+                pad->connectPort(pin, port.net);
+                continue;
+            }
             if (clock_ports.count(pname)) {
                 if (port.type != PORT_IN)
                     log_error("slg47910: the clock port %s must be an input\n", pname.c_str());
@@ -256,7 +346,7 @@ struct SlgImpl : HimbaechelAPI
                 cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(bel));
                 cell->params[id_CLK_TOKEN] = Property(token);
                 cell->params[id_CLK_SIDE] = Property(std::string(clock_tokens().at(token).side));
-                cell->params[id_CLK_DOMAIN] = Property(clock_tokens().at(token).domain);
+                cell->params[id_CLK_DOMAIN] = Property(clock_domain(token));
                 used.insert(pname);
                 made.push_back(std::move(cell));
                 continue;
@@ -293,6 +383,9 @@ struct SlgImpl : HimbaechelAPI
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
         for (auto &[port, bel] : io_bels)
+            if (!used.count(port))
+                log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
+        for (auto &[port, c] : control_ports)
             if (!used.count(port))
                 log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
         for (auto &[port, token] : clock_ports)
@@ -773,24 +866,26 @@ struct SlgImpl : HimbaechelAPI
     void buffer_pads()
     {
         std::vector<std::unique_ptr<CellInfo>> made;
-        for (auto &[name, ci] : ctx->cells) {
-            if (ci->type != id_SLG_IOB || !ci->ports.count(id_PAD) || ci->ports.at(id_PAD).type != PORT_IN)
-                continue;
-            NetInfo *net = ci->getPort(id_PAD);
-            if (net == nullptr || net->driver.cell == nullptr || pad_only_lut(net))
-                continue;
-            auto buf = std::make_unique<CellInfo>(ctx, ctx->idf("%s$buf", name.c_str(ctx)), id_SLG_LUT);
-            buf->params[id_INIT] = Property(0x2ull, 64);
-            buf->params[id_LUT_MODE] = Property("LUT5");
-            NetInfo *out = ctx->createNet(ctx->idf("%s$buf_o", name.c_str(ctx)));
-            buf->addInput(id_I0);
-            buf->addOutput(id_O);
-            ci->disconnectPort(id_PAD);
-            buf->connectPort(id_I0, net);
-            buf->connectPort(id_O, out);
-            ci->connectPort(id_PAD, out);
-            made.push_back(std::move(buf));
-        }
+        for (auto &[name, ci] : ctx->cells)
+            for (IdString pin : {id_PAD, id_OE}) {
+                if (ci->type != id_SLG_IOB || !ci->ports.count(pin) || ci->ports.at(pin).type != PORT_IN)
+                    continue;
+                NetInfo *net = ci->getPort(pin);
+                if (net == nullptr || net->driver.cell == nullptr || pad_only_lut(net))
+                    continue;
+                auto buf = std::make_unique<CellInfo>(ctx, ctx->idf("%s$buf_%s", name.c_str(ctx), pin.c_str(ctx)),
+                                                      id_SLG_LUT);
+                buf->params[id_INIT] = Property(0x2ull, 64);
+                buf->params[id_LUT_MODE] = Property("LUT5");
+                NetInfo *out = ctx->createNet(ctx->idf("%s$buf_%s_o", name.c_str(ctx), pin.c_str(ctx)));
+                buf->addInput(id_I0);
+                buf->addOutput(id_O);
+                ci->disconnectPort(pin);
+                buf->connectPort(id_I0, net);
+                buf->connectPort(id_O, out);
+                ci->connectPort(pin, out);
+                made.push_back(std::move(buf));
+            }
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
     }
@@ -1224,6 +1319,34 @@ struct SlgImpl : HimbaechelAPI
         return it == ci->params.end() ? "" : it->second.as_string();
     }
 
+    // The clock domain a pad's output is retimed on: a row-31 pad's output
+    // passes a register on one of the two domains (bl4 wl26). The vendor puts
+    // it on the domain of the flip-flops behind the pad, on domain 1 when they
+    // are of both (its build of counters on W0 and W1, 2026-11-17); on
+    // silicon an output on the other domain's clock stops while it does.
+    int output_domain(const CellInfo *iob, const std::map<std::string, int> &domains) const
+    {
+        std::vector<const NetInfo *> todo{iob->getPort(id_PAD)};
+        pool<IdString> seen;
+        int domain = 0;
+        while (!todo.empty()) {
+            const NetInfo *net = todo.back();
+            todo.pop_back();
+            if (net == nullptr || net->driver.cell == nullptr || !seen.insert(net->driver.cell->name).second)
+                continue;
+            const CellInfo *ci = net->driver.cell;
+            if (ci->type == id_SLG_FF) {
+                auto it = domains.find(net_of(ci, id_CLK));
+                domain |= it == domains.end() ? 0 : it->second;
+                continue;
+            }
+            for (auto &[name, port] : ci->ports)
+                if (port.type == PORT_IN)
+                    todo.push_back(port.net);
+        }
+        return domain;
+    }
+
     void emit_placement()
     {
         std::ofstream f(ctx->args.options.at("placement").as<std::string>());
@@ -1347,6 +1470,16 @@ struct SlgImpl : HimbaechelAPI
             first = false;
         }
 
+        f << "\n],\n\"held_controls\": [";
+        first = true;
+        for (auto &h : held_controls) {
+            f << (first ? "\n" : ",\n") << "  {\"x\":" << h.x << ",\"y\":" << h.y << ",\"out\":" << h.out
+              << ",\"value\":" << h.value << "}";
+            first = false;
+        }
+        std::map<std::string, int> domains;
+        for (auto &[net, c] : clocks)
+            domains[net] = c.domain;
         f << "\n],\n\"iobs\": [";
         first = true;
         for (auto &[name, ci] : ctx->cells) {
@@ -1354,15 +1487,20 @@ struct SlgImpl : HimbaechelAPI
                 continue;
             Loc loc = ctx->getBelLocation(ci->bel);
             auto port = ci->ports.find(id_PAD);
-            PortType type = port != ci->ports.end() ? port->second.type : PORT_INOUT;
+            // a pad of driven chip controls may drive only its second output (OE)
+            PortType type = port != ci->ports.end() ? port->second.type : ci->ports.count(id_OE) ? PORT_IN : PORT_INOUT;
             const char *dir = type == PORT_IN ? "output" : type == PORT_OUT ? "input" : "inout";
             WireId pad = ctx->getBelPinWire(ci->bel, id_PAD);
             WireId route = uphill_bound(uphill_bound(pad));
+            WireId oe = uphill_bound(uphill_bound(ctx->getBelPinWire(ci->bel, id_OE)));
             f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"gx\":" << loc.x
               << ",\"gy\":" << loc.y << ",\"dir\":\"" << dir << "\",\"pad_in_pin\":" << in_pin(ci->bel, id_PAD)
               << ",\"pad_out_pin\":" << pin_of(downhill_bound(pad), "SPO_") << ",\"pad_in_sm\":\""
               << (route == WireId() ? "" : ctx->getWireName(route).str(ctx)) << "\",\"net\":\""
-              << json_escape(net_of(ci.get(), id_PAD)) << "\"}";
+              << json_escape(net_of(ci.get(), id_PAD)) << "\",\"control\":" << int(ci->attrs.count(ctx->id("CONTROL")))
+              << ",\"oe_sm\":\"" << (oe == WireId() ? "" : ctx->getWireName(oe).str(ctx)) << "\",\"oe_net\":\""
+              << json_escape(net_of(ci.get(), id_OE)) << "\",\"domain\":"
+              << (type == PORT_IN ? output_domain(ci.get(), domains) : 0) << "}";
             first = false;
         }
         f << "\n]\n}\n";

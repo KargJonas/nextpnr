@@ -23,8 +23,9 @@ between nodes. It is a flat graph, so the chipdb is a thin layer over it:
   * the site's wide muxes: MUXF7 (A or B, C or D) and MUXF8 (of the two);
   * the carry chain runs from slice A to D of a site and on, by a dedicated
     pip, to slice A of the next site up its column (the vendor's CIN/COUT);
-  * the three dedicated clock inputs (W0, N0, N1) are bels at (0, 0) whose
-    pad wire reaches every L0 site's CLK through one GCLK pip.
+  * the four dedicated clock inputs (W0 the oscillator, W1 the PLL, N0, N1)
+    are bels at (0, 0) whose pad wire reaches every L0 site's CLK through one
+    GCLK pip.
   * a pip into a line an output pad's enable rests on (graph.json's `rest`)
     has the type `REST:x,y;...`, the pads whose it is.
 
@@ -188,7 +189,7 @@ def main():
     # The dedicated clock inputs, at (0, 0): the pad wire of each is a node
     # that every L0 site's CLK is one pip from.
     tt0 = by_tile[(0, 0)]
-    for z, (token, _d) in enumerate([("W0", 0), ("N0", 0), ("N1", 1)]):
+    for z, (token, _d) in enumerate([("W0", 0), ("N0", 0), ("N1", 1), ("W1", 0)]):
         wire = f"CLKPAD_{token}"
         tt0.create_wire(wire, "CLKPAD")
         bel = tt0.create_bel(f"CLKIN_{token}", "SLG_CLKIN", z=100 + z)
@@ -210,17 +211,17 @@ def main():
             tt.create_wire("PAD", "PAD")
             bel = tt.create_bel("IOB", "SLG_IOB", z=0)
             tt.add_bel_pin(bel, "PAD", "PAD", PinType.INOUT)
-            if x == 31:  # east-edge output pads have an enable of their own
-                tt.create_wire("OE", "OE")
-                tt.add_bel_pin(bel, "OE", "OE", PinType.INPUT)
+            # A pad's second output (the vendor's Output=1): a GPIO's enable,
+            # or the second of the chip controls a pad carries (the PLL's).
+            tt.create_wire("OE", "OE")
+            tt.add_bel_pin(bel, "OE", "OE", PinType.INPUT)
             for p in s["pins"]:
                 w = local(x, y, p["node"])
                 if p["dir"] == "O":
                     pip(tt, "PAD", w, "IOPAD")
                 else:
                     pip(tt, w, "PAD", "IOPAD")
-                    if x == 31:
-                        pip(tt, w, "OE", "IOPAD")
+                    pip(tt, w, "OE", "IOPAD")
             continue
 
         # L0: the clock, enable and reset every flip-flop of the site shares.
