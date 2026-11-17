@@ -135,12 +135,14 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   design with a second clock made in the fabric does not route (`muxtree`,
   `process`, `omsp_dbg_uart` in the regression). Whether the vendor's placer
   takes one is not known.
-- **At most two slices are used in one site** (`-o slices=N`), but where a
-  carry chain fills it: the input pool nodes are shared between neighbouring
-  sites, and without it no router finishes. Three did not help the designs
-  that two leaves unplaced (2026-11-15: `wreduce` placed and did not route). A slice holds a LUT with its own
-  flip-flop, or either alone: an unrelated LUT beside a flip-flop that takes D
-  from the fabric left 9 in 10 placements of a small ALU unroutable.
+- **A site holds as many slices as the design needs**, but where a carry
+  chain fills it: two while its logic takes at most four fifths of two a
+  site, then three or four, as the vendor's packer packs densely only past
+  half the chip. The input pool nodes are shared between neighbouring sites:
+  four everywhere left a small design's fanned-out inputs no way through
+  (`wandwor`). The earlier hard limits (two a site, no unrelated LUT beside
+  a flip-flop that takes D from the fabric) were the graph's missing edges
+  into D1B1-3 and D3B4 (2026-11-17).
 - A row-31 pad's enable holds where the template rests it: on its pad's
   first idle line, in every build that ran. With a net on that line the tools
   move it to the next (as the vendor's do: 2 of 633 pads in its builds), and
@@ -151,9 +153,16 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   and held again with that select cleared (66), or with the enable's mux on
   another line -- not with the line's up-root or any level-13 line in use
   taken off its net, and not with lane 5 (98) or lanes 4 and 5 open: the two
-  lanes stand where a level-13 branch 3 would be, which the graph lacks. Until that input is known route_bits.py refuses a
-  routing that moves an enable, and flow.sh takes the next seed (3 of 73
-  routings of the regression).
+  lanes stand where a level-13 branch 3 would be, which the graph lacks. Moved
+  off its template line by one level less, onto another D1 line, an enable
+  let go too (2026-11-17: the clock enable, done and pass pads of dense
+  builds; it held once, in `wreduce`). So no net takes the lines an output
+  pad's enable rests on: gen_chipdb.py lists them per pad (graph.json's
+  `rest`: the D1 line of the first two (0,'D') muxes of each input pin and
+  the level-5 line its mux selects, in the template), the chipdb types the
+  pips into them `REST:x,y`, and the uarch keeps every net off those of the
+  pads that are outputs. route_bits.py still refuses a routing that moves an
+  enable.
 
 ## On silicon (Shrike, 2026-11-13)
 
