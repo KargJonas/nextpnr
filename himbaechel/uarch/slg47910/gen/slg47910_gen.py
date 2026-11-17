@@ -218,14 +218,16 @@ def main():
             tt.add_bel_pin(bel, "OE", "OE", PinType.INPUT)
             # What the chip states at a pad of its own (PLL_LOCK, OSC_READY),
             # by the pad's input it names: the vendor's Input=0 leaves by O4,
-            # Input=1 by O5 (its routes of them, AN-FG-019's pads).
+            # Input=1 by O5 (its routes of them, AN-FG-019's pads). A GPIO
+            # read is the pad's Input=0: by O4 only (O5 reads 0 on silicon).
             for k in range(2):
                 tt.create_wire(f"IN{k}", "IN")
                 tt.add_bel_pin(bel, f"IN{k}", f"IN{k}", PinType.OUTPUT)
             for p in s["pins"]:
                 w = local(x, y, p["node"])
                 if p["dir"] == "O":
-                    pip(tt, "PAD", w, "IOPAD")
+                    if p["name"] == "O4":
+                        pip(tt, "PAD", w, "IOPAD")
                     pip(tt, f"IN{int(p['name'][1:]) - 4}", w, "IOPAD")
                 else:
                     pip(tt, w, "PAD", "IOPAD")
