@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bitgen import coords  # noqa: E402
+from bitgen.database import DB  # noqa: E402
 
 # Coordinate mapping: (sx, sy, site_type) → RBB name.
 # rbb_x = 3*sy + 1 (interior columns: 1,4,7,10,13,16,19,22,25,28)
@@ -163,6 +164,9 @@ _CLOCK_SOURCE_MUX_BITS = {
     ("E1", 1): (9, [1, 1, 1, 0]),
 }
 
+# A clock input's code in any of the ten clock muxes.
+_CLOCK_INPUT_CODE = {token: bits for (token, _), (_, bits) in _CLOCK_SOURCE_MUX_BITS.items()}
+
 # E0, a clock the fabric makes and takes back (logic as clock, app note
 # AN-FG-019): with it the vendor also sets CLK_0_0_SEL .. CLK_7_0_SEL, at these
 # eight bits (tile x, y, BL, WL), which Kraken's rule #3 claims carry the lane
@@ -180,59 +184,13 @@ _E0_CLOCK_BITS = [(15, 13, 6, 25), (16, 13, 6, 25), (15, 14, 4, 26), (16, 14, 4,
 #   D0B1N0 -> O0=2, O1/SR/CE=1
 #   D0B2N0 -> O0=4, O1/SR/CE=1
 #   D0B3N0 -> O0=8, O1/SR/CE=1
-_EDGE_IOB_OUTPUT_O0_BY_D0_BRANCH = {
-    0: 1,
-    1: 2,
-    2: 4,
-    3: 8,
-}
-
-_EDGE_IOB_OUTPUT_SHARED_SEL_BY_D0_BRANCH = {
-    0: 2,
-    1: 1,
-    2: 1,
-    3: 1,
-}
-
-# Vendor-vs-packer clean single-output deltas that are not represented in the
-# vendor SDC. These are west-edge side bits keyed by fabric site and, for the
-# route-sensitive corner/mid-edge cases, by terminal D0 branch.
-_WEST_IOB_OUTPUT_NVM_BITS = {
-    (0, 0): {
-        0: [(10, 24, 0)],
-    },
-    (0, 8): {
-        0: [(8, 0, 0)],
-    },
-    (0, 9): {
-        0: [(7, 21, 0)],
-    },
-    (0, 22): {
-        None: [(14, 2, 0)],
-        0: [(14, 10, 0)],
-    },
-    (0, 23): {
-        None: [(14, 7, 0)],
-    },
-    (0, 24): {
-        None: [(13, 8, 0)],
-    },
-    # (0, 25) is the dedicated west-edge clk_en pad. NVM_R13 bit 13 (= w13/b13)
-    # is part of the chip-level baseline (0xfbdfe1fe) which has it set to 1;
-    # vendor clears it whenever this pad is routed. Verified across 3 vendor
-    # designs that use (0, 25) and the 184-design corpus where the bit is only
-    # 1 in the 3 designs that do not touch RBB_0_25 (see
-    # docs/methodology/sym-bucket6-findings.md).
-    (0, 25): {
-        None: [(13, 13, 0)],
-    },
-    (0, 30): {
-        None: [(11, 10, 0)],
-    },
-    (0, 31): {
-        None: [(11, 5, 0)],
-    },
-}
+# The oscillator's enable pad (0, 25), held at 1: NVM_R13 bit 13 (BL8 WL1 of
+# its tile, which the template holds at 1) cleared, as the vendor does
+# whenever this pad is used, even with a constant net (verified across 3
+# vendor designs that use (0, 25) and the 184-design corpus where the bit is
+# only 1 in the 3 designs that do not touch RBB_0_25; see
+# docs/methodology/sym-bucket6-findings.md).
+_OSC_CTRL_EN_BITS = [(13, 13, 0)]
 
 # East-edge dynamic-output mode recovered by HITL bit-minimization and a
 # 32-variant MODE-bit sweep on 2026-05-19/20.  When an east-edge output IOB
@@ -542,7 +500,7 @@ _WEST_PAD_TILE = {6: (6, 9), 7: (6, 10), 8: (8, 9), 9: (8, 10), 10: (10, 9), 12:
                   23: (22, 10), 24: (24, 9), 25: (24, 10)}
 
 
-def input_bits(row, col, k):
+def input_bits(row, col, k, bram=False):
     """The bit that takes input k of pad RBB_<row>_<col> (0: what the pad
     reads, by O4; 1 by O5) past the pad's input register, to the fabric: WL16
     (input 0) or WL23 (input 1) at the pad's (tile, BL). The vendor's builds
@@ -555,30 +513,54 @@ def input_bits(row, col, k):
     on silicon. Cleared, GPIO6 reads its pull-up as the vendor's image does,
     PLL_LOCK follows the PLL's enable (13 us behind it) and OSC_READY reads 1
     (2026-11-17)."""
+    wl = 16 if k == 0 else 17 if row % 3 == 1 else 23
+    if bram:
+        # A BRAM pad's in its own tile (design set brampads: every RDATA pad).
+        return [(*_word_bit(col, row, 9, wl), 0)]
     tiles = _WEST_PAD_TILE if row == 0 else _EAST_PAD_ENABLE_TILE if row == 31 else {}
     if col not in tiles:
         raise UnsupportedBackendFeature(f"input {k} of pad RBB_{row}_{col} is not RE-backed")
     tile, bl = tiles[col]
-    return [(*_word_bit(tile, row, bl, 16 if k == 0 else 23), 0)]
+    return [(*_word_bit(tile, row, bl, wl), 0)]
+
+
+_TEMPLATE = None
+
+
+def _template_bit(x, y, bl, wl):
+    """What the empty image (pack.py's template) holds at (tile x, y, BL, WL)."""
+    global _TEMPLATE
+    if _TEMPLATE is None:
+        import struct
+        _TEMPLATE = struct.unpack('<11264I', (DB / "template.bin").read_bytes())
+    word, bit = _word_bit(x, y, bl, wl)
+    return _TEMPLATE[word] >> bit & 1
 
 
 def held_control_bits(held):
-    """The bits of a chip control (the PLL's) a pad holds at a constant.
+    """The bits of a chip control (the PLL's, a BRAM's) a pad holds at a constant.
 
-    Read from the vendor placer's builds of a counter on the PLL, each with one
-    control bit flipped (Kraken harness eda-placer, design set pll, 2026-11-17):
-    in the pad's own tile, an output held at a constant clears BL8 WL1 (output
-    0) or BL7 WL1 (output 1), and its value is held inverted in BL9 at WL6
-    (output 0) or WL13 (output 1; WL14 on row 31). The template holds 1 there:
-    0 on every control. On silicon the PLL then runs at 50 MHz x FBDIV / REFDIV
-    / (POSTDIV1 x POSTDIV2), to 0.05 %."""
+    In the pad's own tile an output held at a constant clears BL8 WL1 (output 0)
+    or BL7 WL1 (output 1), and its value is in BL9 at WL6 (output 0) or WL13
+    (output 1; WL14 on the rows 1 mod 3), as the template's bit there XOR the
+    value: the template holds 0 on every output. Read from the vendor placer's
+    builds of a counter on the PLL, each with one control bit flipped (design
+    set pll: on silicon the PLL then runs at 50 MHz x FBDIV / REFDIV / (POSTDIV1
+    x POSTDIV2), to 0.05 %), and of all eight BRAM slices with each pin held at
+    0 or 1 or driven at random (design set brampads: rows 0-31; where the
+    template holds 0 the value is not inverted), Kraken harness eda-placer,
+    2026-11-17/18."""
     x, y, out, value = (int(held[k]) for k in ('x', 'y', 'out', 'value'))
-    return [(*_word_bit(x, y, 8 - out, 1), 0),
-            (*_word_bit(x, y, 9, 6 if out == 0 else 14 if y == 31 else 13), 1 - value)]
+    where = (x, y, 9, 6 if out == 0 else 14 if y % 3 == 1 else 13)
+    return [(*_word_bit(x, y, 8 - out, 1), 0), (*_word_bit(*where), _template_bit(*where) ^ value)]
 
 
 def control_pad(iob):
-    """The muxes and bits of a pad that carries chip controls the design drives.
+    """The muxes and bits of a pad that carries chip controls the design drives
+    (the PLL's, or a BRAM's: there the output passes no register either, so a
+    BRAM's pins arrive when the design's flip-flops send them; registered, as
+    the vendor packs a flip-flop into a BRAM pad, Vicharak's stack_processor
+    pops wrong values on silicon, 2026-11-18).
 
     A pad's four muxes each pick one of its four inputs (one-hot A..D, the D0
     branch a route arrives by): MUX_O0 the first output's, MUX_O1 the
@@ -602,40 +584,25 @@ def derive_edge_iob_output_muxes(iob):
     """The selects of an edge output's MUX_O0, MUX_O1 and the shared MUX_SR / MUX_CE."""
     gx = int(iob.get('gx', -1))
     gy = int(iob.get('gy', -1))
-    net = iob.get('net', '')
 
-    # East-edge IOBs (gx=31): O0 selects the D0 branch the data came through
-    # (branch k -> one-hot 1<<k, as on the west edge), O1 the one the enable
-    # came through when the design drives it, and SR/CE, which no route drives,
-    # the lowest branch neither takes: A, or B when the data is on A (read from
-    # the vendor's builds of one probe on every row-31 pad; with both on A the
-    # pad sits static high), as control_pad does (and the vendor's build of a
-    # driven enable on GPIO11, design set inout). An enable held at 1 is routed
-    # to nothing: O1 then takes SR/CE's branch.
-    if gx == 31:
-        if net in ('$PACKER_GND', '$PACKER_VCC'):
-            raise UnsupportedBackendFeature(
-                f"east-edge constant output at (31,{gy}) is not supported")
-        data_branch = int(iob.get('pad_in_d0_branch', -1))
-        if data_branch < 0:
-            raise UnsupportedBackendFeature(
-                f"east-edge IOB at (31,{gy}) has no pad_in_d0_branch in placement"
-            )
-        oe_branch = int(iob.get('oe_d0_branch', -1)) if iob.get('oe_net') else -1
-        shared = 1 << min(set(range(4)) - {data_branch, oe_branch})
-        return 1 << data_branch, 1 << oe_branch if oe_branch >= 0 else shared, shared
-
-    branch = int(iob.get('pad_in_d0_branch', -1))
-    o0 = _EDGE_IOB_OUTPUT_O0_BY_D0_BRANCH.get(branch)
-    shared = _EDGE_IOB_OUTPUT_SHARED_SEL_BY_D0_BRANCH.get(branch)
-    if o0 is None or shared is None:
-        raise UnsupportedBackendFeature(
-            f"edge output IOB at ({gx},{gy}) uses unsupported "
-            f"terminal D0 branch {branch}"
-        )
-    if iob.get('oe_net'):
-        raise UnsupportedBackendFeature(f"a driven enable on edge pad ({gx},{gy}) is RE-backed on row 31 only")
-    return o0, shared, shared
+    # Row-0 and row-31 IOBs: O0 selects the D0 branch the data came through
+    # (branch k -> one-hot 1<<k), O1 the one the enable came through when the
+    # design drives it, and SR/CE, which no route drives, the lowest branch
+    # neither takes: A, or B when the data is on A (read from the vendor's
+    # builds of one probe on every row-31 pad; with both on A the pad sits
+    # static high), as control_pad does (and the vendor's build of a driven
+    # enable on GPIO11, design set inout). An enable held at 1 is routed to
+    # nothing: O1 then takes SR/CE's branch.
+    if gx not in (0, 31):
+        raise UnsupportedBackendFeature(f"IOB at ({gx},{gy}) is no row-0 or row-31 pad")
+    data_branch = int(iob.get('pad_in_d0_branch', -1))
+    if data_branch < 0:
+        raise UnsupportedBackendFeature(f"IOB at ({gx},{gy}) has no pad_in_d0_branch in placement")
+    oe_branch = int(iob.get('oe_d0_branch', -1)) if iob.get('oe_net') else -1
+    if oe_branch >= 0 and gx != 31:
+        raise UnsupportedBackendFeature(f"a driven enable on pad ({gx},{gy}) is RE-backed on row 31 only")
+    shared = 1 << min(set(range(4)) - {data_branch, oe_branch})
+    return 1 << data_branch, 1 << oe_branch if oe_branch >= 0 else shared, shared
 
 
 def derive_edge_iob_output_nvm_bits(iob):
@@ -662,44 +629,34 @@ def derive_edge_iob_output_nvm_bits(iob):
     # The enable tile is the pad's own for a single pad (6, 26, 27) and the
     # even tile of its pair for 8/9, 22/23, 24/25 (bl9 for the even pad, bl10
     # for the odd one).
-    if gx == 31:
-        if gy not in _EAST_PAD_ENABLE_TILE:
-            raise UnsupportedBackendFeature(
-                f"east-edge output at (31,{gy}) is not RE-backed (GPIO8-18 are)")
-        et, ebl = _EAST_PAD_ENABLE_TILE[gy]
+    # Row 0's GPIO pads take the same bits at their tiles (_WEST_PAD_TILE),
+    # with the shared muxes' lane 4 a WL nearer (wl13 and wl21: O1 and SR sit
+    # a WL further on the rows 1 mod 3, as row 31 is): the vendor's build of a
+    # counter bit on GPIO6, enable held (design set g6out, 2026-11-18), which
+    # drives GPIO6 on silicon where the earlier table's bits left the driver
+    # off. The oscillator's enable pad (0, 25) keeps its own bits below.
+    tiles = _EAST_PAD_ENABLE_TILE if gx == 31 else _WEST_PAD_TILE if gx == 0 and gy != 25 else {}
+    if gy in tiles:
+        et, ebl = tiles[gy]
         shared = derive_edge_iob_output_muxes(iob)[2]
         if shared not in (1, 2):
-            raise UnsupportedBackendFeature(f"east-edge output at (31,{gy}): data and enable on A and B")
-        lane4 = [(14, 0)] if shared == 1 else [(22, 1), (30, 0)]
-        return ([(*_word_bit(gy, 31, 7, 1), int(bool(iob.get('oe_net')))), (*_word_bit(gy, 31, 8, 1), 1),
-                 (*_word_bit(gy, 31, 4, 26), int(iob['domain'])), (*_word_bit(et, 31, ebl, 25), 0)] +
-                [(*_word_bit(et, 31, ebl, wl), v) for wl, v in lane4])
+            raise UnsupportedBackendFeature(f"output at ({gx},{gy}): data and enable on A and B")
+        shift = int(gx % 3 == 1)
+        lane4 = [(13 + shift, 0)] if shared == 1 else [(21 + shift, 1), (30, 0)]
+        if gx == 0 and shared != 1:
+            # Row 0 holds the enable by wl13 with the shared muxes on B too: on
+            # silicon GPIO6 drives with it and not without (2026-11-18), where
+            # row 31 drives with the vendor's template bit there.
+            lane4.append((13, 0))
+        return ([(*_word_bit(gy, gx, 7, 1), int(bool(iob.get('oe_net')))), (*_word_bit(gy, gx, 8, 1), 1),
+                 (*_word_bit(gy, gx, 4, 26), int(iob['domain'])), (*_word_bit(et, gx, ebl, 25), 0)] +
+                [(*_word_bit(et, gx, ebl, wl), v) for wl, v in lane4])
+    if gx == 31:
+        raise UnsupportedBackendFeature(f"east-edge output at (31,{gy}) is not RE-backed (GPIO8-18 are)")
 
-    # West IOB constant outputs ($PACKER_GND / $PACKER_VCC): the
-    # _WEST_IOB_OUTPUT_NVM_BITS entries were recovered from fabric-driven
-    # single-output probes (fuzz.py make_iobmux), where the bits at
-    # (0,22)/(0,23)/(0,24) drop to 0 because the IOB output path is
-    # active. For constant outputs the vendor leaves those bits at the
-    # empty-bitstream default of 1 (verified against iob_const_00, which
-    # has $PACKER_VCC on every west q_en pad). Suppressing the clear here
-    # closes Bucket 1 bits 13/8, 14/2, 14/7 on osc_probe.
-    #
-    # Exception: (0, 25) is the dedicated clock-enable pad — vendor clears
-    # w13/b13 whenever it is used, even with a constant net. Verified across
-    # all 3 of the 184-design corpus designs that don't touch RBB_0_25 vs the
-    # 181 that do (see docs/methodology/sym-bucket6-findings.md).
-    if net in ('$PACKER_GND', '$PACKER_VCC') and key != (0, 25):
-        return []
-
-    branch = int(iob.get('pad_in_d0_branch', -1))
-    table = _WEST_IOB_OUTPUT_NVM_BITS.get(key)
-    if table is None:
-        return []
-
-    bits = []
-    bits.extend(table.get(None, []))
-    bits.extend(table.get(branch, []))
-    return bits
+    # Row 0's other pads (the BRAM's) are controls, and constants on GPIO
+    # pads are LUTs: what is left is the oscillator's enable.
+    return _OSC_CTRL_EN_BITS if key == (0, 25) else []
 
 
 def ff_is_set_type(ff_type):
@@ -919,6 +876,10 @@ def emit_sdc(placement, out_file):
                     mux_bits[mux][0] = 1
                 for where in _E0_CLOCK_BITS:
                     emit_direct_nvm_bit(f, *_word_bit(*where), 1)
+        # A BRAM block's clock outputs (N out0/out1, S out0/out1: muxes 4-7)
+        # take a clock input by the domain muxes' code for it (bram_clocks).
+        for bram_clock in placement.get('bram_clocks', []):
+            mux_bits[int(bram_clock['mux'])] = _CLOCK_INPUT_CODE[bram_clock['token']][:]
         for mux_idx in range(10):
             bits = mux_bits[mux_idx]
             for sel_bit in range(4):
@@ -1299,6 +1260,13 @@ def emit_sdc(placement, out_file):
             for reg, bit, value in held_control_bits(held):
                 emit_direct_nvm_bit(f, reg, bit, value)
 
+        # The BRAM blocks the design uses are powered (datasheet register map:
+        # bits 320 and 321 power down BRAM 0-3 and 4-7, 1 by default), in the
+        # image's header (pack.py).
+        for block, reg in (('N', 320), ('S', 321)):
+            if block in placement.get('brams', ''):
+                f.write(f"set_case_analysis 0 TILE_00/HEADER_{reg}\n")
+
         # --- Side-/north-edge IOB outputs ---
         # These use a different route-aware mux scheme than CLB rows. The
         # recovered mapping is keyed by the terminal D0 branch feeding the L6
@@ -1311,7 +1279,7 @@ def emit_sdc(placement, out_file):
             # The pad's inputs the fabric reads: what the pad reads (input 0)
             # and what the chip states at it.
             for k in iob.get('inputs', []):
-                for reg, bit, value in input_bits(gx, gy, k):
+                for reg, bit, value in input_bits(gx, gy, k, bool(iob.get('bram'))):
                     emit_direct_nvm_bit(f, reg, bit, value)
 
             if direction != 'output':

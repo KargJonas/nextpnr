@@ -82,6 +82,48 @@ its enable held and driven). On the Shrike GPIO11 drives while its enable is
 high, floats to its pull-up while it is low, and reads back what the pad holds
 either way. Row 31 only: the other edges' driven enable is not read yet.
 
+Row 0's GPIOs (GPIO0-7) drive as row 31's do, the enable held by the shared
+muxes' lane-4 bit (wl13), which row 0 needs with the shared muxes on B too.
+The analyser sees none of them; the RP2040 reads GPIO6, its SPI MISO, and on
+the Shrike GPIO6 now drives (Vicharak's SPI examples answer through it).
+
+## BRAM
+
+The 32 kb of block RAM (datasheet chapter 9: eight 4 kb slices, BRAM0-3 north
+and BRAM4-7 south) sits outside the fabric: the fabric drives a slice's pins
+through pads and reads its data from pads, as it does the PLL's controls. A
+design names them as GoConfigure's io planner does, ports set in the pin file
+by the pins' own names, and the slice's clocks by a side's clock outputs:
+
+    set_clk clk W0
+    set_io  clk BRAM_N_WCLK                  # north write clock (and BRAM_N_RCLK, BRAM_S_*)
+    set_io  wen BRAM0_nWEN                   # nWCLKEN, nREN, nRCLKEN, RATIO[0..1]
+    set_io  d[0] BRAM0_WDATA[0]              # WDATA[0..7], WADDR[0..8], RADDR[0..8]
+    set_io  q[0] BRAM0_RDATA[0]              # an input: what the slice reads
+
+A BRAM clock output takes a clock input (the port's own, or the clock input
+whose net an output port carries): clock muxes 4-7 (N out0, N out1, S out0, S
+out1) take its code. A write pin held at a constant is the pad's to hold; one
+the design drives passes no register at the pad (as the PLL's controls), and
+RDATA bits leave their pads past the input register. The image's header powers
+the blocks a design uses (register bits 320 and 321). The pin map is Vicharak's
+shrike_serv io planner (all eight slices; 4-7 are 0-3 with the column
+mirrored); the pads' bits, all in each pad's own tile at BL9 (muxes from WL2,
+WL9, WL17, WL26, the held value at WL6 or WL13, the input's bypass at WL16 or
+WL23: O1, SR, the held value and input 1 a WL further on the rows 1 mod 3),
+are from Kraken's vendor builds of design set `brampads` (every pin held at 0,
+at 1 or driven at random, every RDATA read or not), and the clock muxes' from
+the vendor builds that set them. Not done: the clock inversions and the power
+down pin (left undriven, as GoConfigure's designs leave them), a Yosys memory
+mapped onto a slice, and which of CLK_6 and CLK_7 is the south read clock.
+
+On the Shrike our build of the vendor's own BRAM test (pol0: write once, read
+slowly) reads its data back, and our build of Vicharak's stack_processor (a
+stack in BRAM0 over SPI) pops all sixteen values and multiplies right, as
+GoConfigure's image does. The loader matters: Vicharak's ShrikeFlash resets the
+FPGA with EN and PWR low together, after which the BRAM reads 0 until the chip
+next powers up; hw/firmware resets it by PWR alone.
+
 ## Timing
 
 The fabric's delays are the vendor's own: the placer's install carries them

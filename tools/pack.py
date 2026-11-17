@@ -577,6 +577,7 @@ def parse_sdc(sdc_path):
 
 
 _DIRECT_NVM_RE = re.compile(r'^NVM_R(\d+)_B(\d+)$')
+_HEADER_RE = re.compile(r'^HEADER_(\d+)$')
 _DIRECT_RAW_RE = re.compile(r'^RAW_W(\d+)_B(\d+)$')
 
 
@@ -627,6 +628,22 @@ def direct_nvm_to_bitstream(signal):
 # setting the third (all three vendor builds of make_multiclk, W0 and N1):
 #   CLK_9_0_SEL → word 5912 (x=16, y=25, pos=5), bit 14
 
+#
+# CLK_4..CLK_7 feed the BRAM's clock outputs (N out0, N out1, S out0, S out1)
+# and take a clock input by the same code. Their selects sit in the same block
+# (x 15-16, y 13-17; the eight bits of emit_sdc's _E0_CLOCK_BITS are the
+# muxes' select 0), each in one of two layouts: select 0 at BL6 WL25, 1 at BL4
+# WL26, 2 at BL4 WL27 (CLK_4's tile (16,13), as CLK_8's and CLK_9's), or
+# selects 0-2 at BL4 WL26-28 (CLK_5's (16,14)). Read from the vendor's builds
+# whose SDC sets them to more than one code (Kraken, 158 builds, 2026-11-18):
+# CLK_4 and CLK_5 one bit each; CLK_6 and CLK_7 (tiles (15,15) and (15,17))
+# the vendor has only ever set alike, so which is which is not known.
+
+def _clk_mux_bits(x, y, layout):
+    places = [(6, 25), (4, 26), (4, 27)] if layout == "a" else [(4, 26), (4, 27), (4, 28)]
+    return {sel: (*coords.trace_to_word_bit(x, y, bl, wl), False) for sel, (bl, wl) in enumerate(places)}
+
+
 # Map from SDC signal name to (word_idx, bit, inverted)
 _CLK_MUX_MAP = {
     "CLK_8_0_SEL": (5912, 17, False),
@@ -635,6 +652,9 @@ _CLK_MUX_MAP = {
     "CLK_9_1_SEL": (5923, 12, False),
     "CLK_9_2_SEL": (5934, 12, False),
 }
+for _mux, (_x, _y, _layout) in {4: (16, 13, "a"), 5: (16, 14, "b"), 6: (15, 15, "a"), 7: (15, 17, "b")}.items():
+    for _sel, _place in _clk_mux_bits(_x, _y, _layout).items():
+        _CLK_MUX_MAP[f"CLK_{_mux}_{_sel}_SEL"] = _place
 
 # Signals that are always at template defaults — mark as handled
 _CLK_MUX_DEFAULT = set()
@@ -735,7 +755,7 @@ _EDGE_MUX_DEFAULT_VALUE = {
 def edge_mux_to_bitstream(rbb_x, rbb_row, signal):
     """Convert an edge-column IOB mux selector to bitstream position."""
     if rbb_x not in (0, 31):
-        return None
+        return side_iob_mux_to_bitstream(rbb_x, rbb_row, signal)
 
     row_bits = _EDGE_MUX_ROW_BITS.get(rbb_row)
     if row_bits is None:
@@ -754,6 +774,28 @@ def edge_mux_to_bitstream(rbb_x, rbb_row, signal):
     pos, bit = row_bits
     inverted = _EDGE_MUX_INVERTED[sel] ^ is_complement
     return xyp_to_word(rbb_x, y, pos), bit, inverted
+
+
+def side_iob_mux_to_bitstream(row, col, signal):
+    """A mux selector of a pad on columns 0, 1, 30 and 31 (RBB_<row>_<col>,
+    rows 1-30: the BRAM's pads). Each pad's in its own tile at BL9, its muxes
+    one-hot from WL2 (O0), WL9 (O1), WL17 (SR) and WL26 (CE), the B select
+    inverted -- the layout of the row-0/31 table above, whose unpaired pads it
+    reproduces bit for bit -- with O1 and SR a WL further on the rows 1 mod 3,
+    as on row 31. Read from the vendor's builds of the BRAM's pads (design sets
+    brampads, bram and stackp, Kraken harness eda-placer, 2026-11-18): every
+    select it set is the bit; SR and CE it always sets alike, so which of the
+    two groups is which is not known."""
+    if col not in (0, 1, 30, 31) or not 0 < row < 31:
+        return None
+    match = _EDGE_MUX_RE.match(signal)
+    if not match:
+        return None
+    mux_name, sel = match.group(1), f"{match.group(2)}SEL"
+    wl = (_EDGE_MUX_Y_BASE_WEST[mux_name] + _EDGE_MUX_SEL_OFFSET[sel] +
+          int(row % 3 == 1 and mux_name in ("MUX_O1", "MUX_SR")))
+    word, bit = coords.trace_to_word_bit(col, row, 9, wl)
+    return word, bit, _EDGE_MUX_INVERTED[sel] ^ bool(match.group(3))
 
 
 def edge_mux_is_template_default(rbb_x, rbb_row, signal, value):
@@ -1176,47 +1218,20 @@ def lut_ipt_sel_is_known_fixed_shape(rbb_x, rbb_row, signal, value, lut_ipt_valu
 
 
 # ---------------------------------------------------------------------------
-# BRAM-adjacent template-preserved aliases
+# A select the generic formula gets wrong, whose template bit is the vendor's
 # ---------------------------------------------------------------------------
-# Two categories remain after the main BRAM-adjacent mux recovery:
-#
-# _BRAM_DEFAULT_SKIP_SIGNALS: the generic formula would write the wrong raw
-# value, but the empty-bitstream template already holds the correct vendor
-# value (template bit == vendor bit).  No route-template is needed — we just
-# suppress the formula write entirely so the template bit is left untouched.
-#
-#   RBB_4_31/MUX_O1/CSEL: formula writes raw=0, template=1=vendor → skip.
-#   RBB_16_28/MUX_D6/BSEL: formula writes raw=0, template=1=vendor → skip.
-#
-# _BRAM_TEMPLATE_PRESERVE_SIGNALS: the generic formula is wrong AND the
-# template bit does not hold the correct vendor value.  The only source of
-# truth is the vendor-routed bitstream, so we must copy it from the
-# route-template.
-#
-#   RBB_1_30/MUX_O1/BSEL: the BRAM output routing clears a bit that the
-#   non-BRAM convention leaves high.  The correct raw value (0) differs from
-#   the template (1) and depends on the BRAM routing solution, not just the
-#   SDC value.
+#   RBB_16_28/MUX_D6/BSEL: formula writes raw=0, template=1=vendor -> skip.
+# (The BRAM pads' MUX_O1 selects once excepted here, RBB_1_30's and RBB_4_31's,
+# side_iob_mux_to_bitstream now writes as the vendor does.)
 
-_BRAM_DEFAULT_SKIP_SIGNALS = {
-    (4, 31): {"MUX_O1/CSEL"},
+_DEFAULT_SKIP_SIGNALS = {
     (16, 28): {"MUX_D6/BSEL"},
 }
 
-_BRAM_TEMPLATE_PRESERVE_SIGNALS = {
-    (1, 30): {"MUX_O1/BSEL"},
-}
 
-
-def bram_default_skip_signal(rbb_x, rbb_row, signal):
-    """Return True for BRAM signals whose template bit is already correct."""
-    signals = _BRAM_DEFAULT_SKIP_SIGNALS.get((rbb_x, rbb_row))
-    return signals is not None and signal in signals
-
-
-def bram_template_preserve_signal(rbb_x, rbb_row, signal):
-    """Return True for BRAM-adjacent aliases to preserve from route template."""
-    signals = _BRAM_TEMPLATE_PRESERVE_SIGNALS.get((rbb_x, rbb_row))
+def default_skip_signal(rbb_x, rbb_row, signal):
+    """Return True for a select whose template bit is already correct."""
+    signals = _DEFAULT_SKIP_SIGNALS.get((rbb_x, rbb_row))
     return signals is not None and signal in signals
 
 
@@ -1258,9 +1273,7 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
         "packed_lut_ipt": 0,
         "packed_slice_mux": 0,
         "skipped_slice_mux_uncovered": 0,
-        "packed_bram_nvm": 0,
-        "packed_bram_default_skip": 0,
-        "packed_bram_template": 0,
+        "packed_default_skip": 0,
         "skipped_complement": 0,
         "unmapped": 0,
         "unmapped_signals": [],
@@ -1280,11 +1293,6 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
                 words[wi] ^= diff
                 stats["route_words_copied"] += 1
 
-    has_bram_hard_ip = any(
-        re.match(r'RBB_\d+_(2[6-9]|3[01])/', path)
-        for path in sdc_data
-    )
-
     # Track which signals are complements. We only need to pack one side of
     # pairs like ASEL/ASELb and XOR/XORb.
     sel_complement_re = re.compile(r'(.+SEL)b$')
@@ -1303,14 +1311,6 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
         else:
             words[word_idx] &= ~(1 << bit)
         return True
-
-    if has_bram_hard_ip:
-        # Vendor BRAM designs require these NVM bits whenever rows 26-31 are
-        # active. The open nextpnr flow does not emit them explicitly.
-        apply_bit(193 // 32, 193 % 32, False, 1)  # reg_bram_keep=1
-        apply_bit(320 // 32, 320 % 32, False, 0)  # bram_0_3_powerdown=0
-        apply_bit(321 // 32, 321 % 32, False, 0)  # bram_4_7_powerdown=0
-        stats["packed_bram_nvm"] = 3
 
     # Synthetic direct NVM/RAW overrides (RAW_W*_B* / NVM_R*_B*) are processed
     # in a final pass so they trump any conflicting bit landed earlier by the
@@ -1357,6 +1357,11 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
             stats["packed_direct_nvm"] += 1
             continue
 
+        # The header's register bits go to the MCU image's header (mcu_header).
+        if _HEADER_RE.match(sdc_path):
+            stats["packed_direct_nvm"] += 1
+            continue
+
         # Tier 3: edge-column IOB mux formulas.  These are separate from the
         # row formulas because perimeter RBBs use different bit positions from
         # the interior CLB columns.
@@ -1366,14 +1371,8 @@ def pack_bitstream(sdc_data, template_words, db_mappings, row_formulas=None,
             rbb_row = int(rbb_match.group(2))
             signal = rbb_match.group(3)
 
-            if has_bram_hard_ip and \
-               bram_default_skip_signal(rbb_x, rbb_row, signal):
-                stats["packed_bram_default_skip"] += 1
-                continue
-
-            if route_template_words is not None and has_bram_hard_ip and \
-               bram_template_preserve_signal(rbb_x, rbb_row, signal):
-                stats["packed_bram_template"] += 1
+            if default_skip_signal(rbb_x, rbb_row, signal):
+                stats["packed_default_skip"] += 1
                 continue
 
             result = edge_mux_to_bitstream(rbb_x, rbb_row, signal)
@@ -1771,13 +1770,28 @@ def crc16(words: list[int]) -> int:
     return r
 
 
-def axi_to_mcu(axi_words: list[int]) -> bytes:
+def mcu_header(sdc_data) -> bytes:
+    """The image's header: the fixed one, with the register bits the SDC sets
+    (TILE_00/HEADER_<n>, n the datasheet's absolute register bit; the header
+    holds bits 192 to 479, from its first byte's lowest bit)."""
+    header = bytearray(_MCU_FIXED_HEADER)
+    for path, value in sdc_data.items():
+        m = _HEADER_RE.match(path)
+        if m:
+            n = int(m.group(1)) - 192
+            if not 0 <= n < 8 * len(header):
+                raise ValueError(f"{path}: not a header bit (192..479)")
+            header[n // 8] = header[n // 8] & ~(1 << n % 8) | value << n % 8
+    return bytes(header)
+
+
+def axi_to_mcu(axi_words: list[int], header: bytes = _MCU_FIXED_HEADER) -> bytes:
     """The MCU image the HITL firmware takes: preamble, sync word, the fixed
     header, then the AXI words, all words stored little-endian, with each
     block -- the header, then every 11 words (a row) -- followed by its check
     word. The firmware checks every block and sends the chip the image
     without the check words (the chip takes only that), or refuses it."""
-    blocks = [list(struct.unpack("<9I", _MCU_FIXED_HEADER))]
+    blocks = [list(struct.unpack("<9I", header))]
     blocks += [axi_words[i:i + 11] for i in range(0, len(axi_words), 11)]
     out = bytearray(_MCU_PREAMBLE_ZEROS) + struct.pack(">I", _MCU_SYNC_WORD)
     for block in blocks:
@@ -1892,9 +1906,7 @@ Examples:
     if stats['skipped_slice_mux_uncovered']:
         print(f"  Skipped (slice mux):  {stats['skipped_slice_mux_uncovered']}")
     print(f"  Packed (LUT_IPT):     {stats['packed_lut_ipt']}")
-    print(f"  Packed (BRAM NVM):    {stats['packed_bram_nvm']}")
-    print(f"  Skipped (BRAM dflt):  {stats['packed_bram_default_skip']}")
-    print(f"  Preserved (BRAM tpl): {stats['packed_bram_template']}")
+    print(f"  Skipped (default):    {stats['packed_default_skip']}")
     print(f"  Skipped complements:  {stats['skipped_complement']}")
     print(f"  Unmapped:             {stats['unmapped']}")
     if stats['route_words_copied']:
@@ -1906,8 +1918,7 @@ Examples:
                     stats['packed_edge_mux'] +
                     stats['packed_rbb_clk'] + stats['packed_we_sel'] +
                     stats['packed_slice_mux'] + stats['skipped_slice_mux_uncovered'] +
-                    stats['packed_lut_ipt'] + stats['packed_bram_default_skip'] +
-                    stats['packed_bram_template'])
+                    stats['packed_lut_ipt'] + stats['packed_default_skip'])
     effective = stats['total_sdc'] - stats['skipped_complement']
     if effective > 0:
         pct = 100.0 * total_packed / effective
@@ -1953,7 +1964,7 @@ Examples:
             Path(args.axi_log).write_text("".join(lines))
             print(f"AXI log:    {args.axi_log} ({len(axi_words)} words)")
         if args.mcu:
-            mcu_data = axi_to_mcu(axi_words)
+            mcu_data = axi_to_mcu(axi_words, mcu_header(parse_sdc(args.sdc)))
             Path(args.mcu).write_bytes(mcu_data)
             print(f"MCU format: {args.mcu} ({len(mcu_data)} bytes)")
 
