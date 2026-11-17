@@ -266,8 +266,10 @@ _WEST_IOB_OUTPUT_NVM_BITS = {
 # applied via the direct-NVM tier in pack.py so it trumps the conflicting
 # edge-mux write.
 # Row-31 pad -> (tile, bl) of its enable bits: the pad's own tile at bl9 when
-# it is single, else the even tile of its pair (8/9, 22/23, 24/25).
-_EAST_PAD_ENABLE_TILE = {6: (6, 9), 8: (8, 9), 9: (8, 10), 22: (22, 9), 23: (22, 10),
+# it is single, else the even tile of its pair (8/9, 22/23, 24/25). GPIO17
+# and GPIO18 (4, 5) each at its own (Kraken's builds of design set top45,
+# 2026-11-17; not on the Shrike's analyser, so not seen on silicon).
+_EAST_PAD_ENABLE_TILE = {4: (4, 9), 5: (5, 9), 6: (6, 9), 8: (8, 9), 9: (8, 10), 22: (22, 9), 23: (22, 10),
                          24: (24, 9), 25: (24, 10), 26: (26, 9), 27: (27, 9)}
 
 
@@ -652,7 +654,7 @@ def derive_edge_iob_output_nvm_bits(iob):
     if gx == 31:
         if gy not in _EAST_PAD_ENABLE_TILE:
             raise UnsupportedBackendFeature(
-                f"east-edge output at (31,{gy}) is not RE-backed (GPIO16, 8-13 are)")
+                f"east-edge output at (31,{gy}) is not RE-backed (GPIO8-18 are)")
         et, ebl = _EAST_PAD_ENABLE_TILE[gy]
         lane4 = [(14, 0)] if derive_edge_iob_output_muxes(iob)[1] == 1 else [(22, 1), (30, 0)]
         return ([(*_word_bit(gy, 31, 7, 1), 0), (*_word_bit(gy, 31, 8, 1), 1),
