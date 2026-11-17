@@ -5,6 +5,9 @@
     hw.py capture [--ms 2000] [--rate 1000000] [-o out.vcd]
     hw.py ab <bitstream_mcu.bin>...     flash + capture + report each in turn
 
+The firmware checks every block's check word before it touches the FPGA and
+answers REFUSED <where> on a mismatch; `ab` then prints `refused` and captures nothing.
+
 The Shrike's RP2040 runs the HITL firmware (PING/FLASH protocol). The logic
 analyzer is an fx2lafw clone whose D0..D7 are FPGA GPIO8..15.
 """
@@ -16,13 +19,11 @@ from pathlib import Path
 
 import serial
 
-MCU_SIZE = 46408
-
 
 def flash_once(path, port="/dev/ttyACM0"):
+    """Load one MCU image (pack.py's, with its check words): the firmware's CONFIG=
+    line, or its REFUSED line when a check word does not match (the FPGA untouched)."""
     data = Path(path).read_bytes()
-    if len(data) != MCU_SIZE:
-        sys.exit(f"{path}: {len(data)} bytes, expected the {MCU_SIZE}-byte MCU format")
     with serial.Serial(port, 115200, timeout=5) as s:
         time.sleep(0.3)
         s.reset_input_buffer()
@@ -49,6 +50,8 @@ def flash_once(path, port="/dev/ttyACM0"):
             line = s.readline().decode(errors="replace").strip()
             if line.startswith("CONFIG="):
                 config = line
+            if line.startswith("REFUSED"):
+                return line
             if line == "OK":
                 return config
             if line.startswith("ERR"):
@@ -117,6 +120,9 @@ def main():
     else:
         for b in args.bins:
             cfg = flash(b)
+            if cfg.startswith("REFUSED"):
+                print(f"refused {b}: {cfg}", flush=True)
+                continue
             time.sleep(0.5)
             vcd = Path(b).with_suffix(".vcd")
             report(f"{b} ({cfg})", capture(vcd, args.ms, args.rate), args.ms)

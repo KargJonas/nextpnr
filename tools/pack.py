@@ -1680,7 +1680,6 @@ _MCU_FIXED_HEADER = bytes([
     0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00,
 ])
-_MCU_TOTAL_BYTES = 46408
 
 
 def _load_axi_perm() -> list[int]:
@@ -1760,24 +1759,35 @@ def raw_to_axi(raw_words: list[int]) -> list[int]:
     return axi_words
 
 
+def crc16(words: list[int]) -> int:
+    """The check word of a block of AXI words, as eda-placer writes it in
+    EFLX_bitstream_AXI_CRC.log: CRC-16, polynomial 0xA2EB reflected (0xD745),
+    initial value 0, no final XOR, each word fed from bit 0 to bit 31."""
+    r = 0
+    for w in words:
+        for b in range(32):
+            r ^= (w >> b) & 1
+            r = (r >> 1) ^ 0xD745 if r & 1 else r >> 1
+    return r
+
+
+def axi_to_mcu(axi_words: list[int]) -> bytes:
+    """The MCU image the HITL firmware takes: preamble, sync word, the fixed
+    header, then the AXI words, all words stored little-endian, with each
+    block -- the header, then every 11 words (a row) -- followed by its check
+    word. The firmware checks every block and sends the chip the image
+    without the check words (the chip takes only that), or refuses it."""
+    blocks = [list(struct.unpack("<9I", _MCU_FIXED_HEADER))]
+    blocks += [axi_words[i:i + 11] for i in range(0, len(axi_words), 11)]
+    out = bytearray(_MCU_PREAMBLE_ZEROS) + struct.pack(">I", _MCU_SYNC_WORD)
+    for block in blocks:
+        out += struct.pack(f"<{len(block) + 1}I", *block, crc16(block))
+    return bytes(out)
+
+
 def raw_to_mcu(raw_words: list[int]) -> bytes:
-    """Convert raw-format words (little-endian uint32) to 46408-byte MCU format.
-
-    Calls raw_to_axi() for the permutation, then wraps the resulting AXI words
-    with the MCU preamble, sync word, and fixed header. Each AXI word is stored
-    little-endian in the payload per the MCU format.
-    """
-    axi_words = raw_to_axi(raw_words)
-
-    # Build MCU payload: preamble + sync + header + AXI words (LE) + padding
-    out = bytearray(_MCU_PREAMBLE_ZEROS)
-    out += struct.pack(">I", _MCU_SYNC_WORD)
-    out += _MCU_FIXED_HEADER
-    for w in axi_words:
-        out += struct.pack("<I", w)   # byte-reversed (little-endian) per MCU format
-    if len(out) < _MCU_TOTAL_BYTES:
-        out += bytes(_MCU_TOTAL_BYTES - len(out))
-    return bytes(out[:_MCU_TOTAL_BYTES])
+    """Raw-format words (little-endian uint32) as the MCU image (axi_to_mcu)."""
+    return axi_to_mcu(raw_to_axi(raw_words))
 
 
 def main():
@@ -1812,7 +1822,7 @@ Examples:
     parser.add_argument("--verify", metavar="REF.bin",
                         help="Verify against reference bitstream")
     parser.add_argument("--mcu", metavar="OUTPUT.bin",
-                        help="Also write MCU-format bitstream (46408 bytes, ready to flash)")
+                        help="Also write the MCU image, with its check words (ready to flash)")
     parser.add_argument("--axi-log", metavar="OUTPUT.log",
                         help="Write AXI-order words to log (one 8-digit hex per line, "
                              "matches vendor EFLX_bitstream_AXI.log format)")
@@ -1943,14 +1953,7 @@ Examples:
             Path(args.axi_log).write_text("".join(lines))
             print(f"AXI log:    {args.axi_log} ({len(axi_words)} words)")
         if args.mcu:
-            out = bytearray(_MCU_PREAMBLE_ZEROS)
-            out += struct.pack(">I", _MCU_SYNC_WORD)
-            out += _MCU_FIXED_HEADER
-            for w in axi_words:
-                out += struct.pack("<I", w)
-            if len(out) < _MCU_TOTAL_BYTES:
-                out += bytes(_MCU_TOTAL_BYTES - len(out))
-            mcu_data = bytes(out[:_MCU_TOTAL_BYTES])
+            mcu_data = axi_to_mcu(axi_words)
             Path(args.mcu).write_bytes(mcu_data)
             print(f"MCU format: {args.mcu} ({len(mcu_data)} bytes)")
 

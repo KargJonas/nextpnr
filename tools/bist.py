@@ -239,6 +239,8 @@ def main():
     # 200 ms at 50 MHz: ten heartbeats; as many at a slower clock
     r = subprocess.run([sys.executable, str(REPO / "hw/hw.py"), "ab", str(out / "hb/bitstream_mcu.bin"),
                         "--rate", "1000000", "--ms", str(int(200 * 50 / mhz))], capture_output=True, text=True, cwd=REPO)
+    if r.stdout.startswith("refused"):
+        print(f"REFUSED luts={luts} {r.stdout.split(': ', 1)[1].strip()}"); return
     final, edges = {"!": None, "#": None, "&": None}, {"!": 0, "#": 0, "&": 0}
     for line in open(out / "hb/bitstream_mcu.vcd"):
         if line.startswith("#"):
