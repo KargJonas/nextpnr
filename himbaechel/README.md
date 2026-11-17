@@ -175,7 +175,16 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   FDPE: the block's QasyncSRen). It always clears what a flip-flop holds; a
   setting one holds its value inverted (xQpol 0 inverts its D), so it starts
   at 1 and the sinks of its Q take the inversion back. A flip-flop with both a
-  set and a reset is refused.
+  set and a reset has no cell in the chip, and neither has a latch. The
+  vendor's placer says so ("not supported in EFLX hardware! Creating SW
+  work-around to mimick the data-latch functionality in LUTs") and builds a
+  latch as a LUT that feeds back into itself. So does the flow (`latch_map.v`,
+  after abc, which takes no loop), and Yosys makes the flip-flop of an FDCE,
+  an FDPE, such a latch and a mux. The uarch times no path through a LUT's
+  feedback. Both run on silicon: a latch, and a flip-flop with a set and a
+  reset that come from flip-flops. A set or a reset that a LUT makes of
+  inputs changing together can glitch, which a cycle simulation does not see
+  (`dff_different_styles` fails its BIST so).
 - **A flip-flop's clock comes from a clock input** (W0, W1, N0, N1, E0), one
   GCLK pip from every site, and a site's flip-flops share one. A clock the
   fabric makes (a divider, a gated clock, a pad that is no clock input) goes
