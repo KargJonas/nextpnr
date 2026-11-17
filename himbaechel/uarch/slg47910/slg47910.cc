@@ -1,10 +1,9 @@
 /*
  * nextpnr-himbaechel uarch for the Renesas SLG47910 (ForgeFPGA).
  *
- * The chipdb (slg47910_gen.py) is the vendor's routing graph with the 100 L0
- * logic sites that have no memory view (four slices of a LUT6, two flip-flops
- * and a bit of the carry chain), the 184 L6 pads and the three dedicated
- * clock inputs as bels. This file is what
+ * The chipdb (slg47910_gen.py) is the vendor's routing graph with the 140 L0
+ * logic sites (four slices of a LUT6, two flip-flops and a bit of the carry
+ * chain), the 184 L6 pads and the three dedicated clock inputs as bels. This file is what
  * nextpnr does with it:
  *
  *   pack       pads and clock inputs from the ports and a pin file, the
@@ -14,8 +13,10 @@
  *              MUXF7 or a MUXF8 as one cluster with the LUTs it takes,
  *              two LUTs of five inputs in all as one slice's two halves
  *   validity   the flip-flops of a site share one enable and one reset; a
- *              site's four I5 pins bring in at most four nets; at most two
- *              slices of a site in use but where a carry chain fills it
+ *              site's four I5 pins bring in at most four nets; as many
+ *              slices of a site in use as the design needs (two while its
+ *              logic fits in the sites with room to spare, up to four), but
+ *              where a carry chain fills it
  *   postRoute  what the bitstream tools take: where every cell sits and what
  *              each net's route is, as JSON (placement.json, routing.json),
  *              in the names of the chipdb, which the bitstream tools
@@ -106,8 +107,6 @@ struct SlgImpl : HimbaechelAPI
                                "pin file: `set_io <port> GPIO<n>|<row> <col>`, `set_clk <port> W0|N0|N1`");
         specific.add_options()("speed", po::value<std::string>(),
                                "the speed grade, a condition the vendor times under (its builds' when not given)");
-        specific.add_options()("slices", po::value<int>()->default_value(2),
-                               "slices (LUT and flip-flop pairs) a placer may use in one site");
         specific.add_options()("placement", po::value<std::string>(), "where to write the placement, as JSON");
         specific.add_options()("routing", po::value<std::string>(), "where to write the routing, as JSON");
         return specific;
@@ -128,7 +127,6 @@ struct SlgImpl : HimbaechelAPI
     {
         h.init(ctx);
         HimbaechelAPI::init(ctx);
-        slices = ctx->args.options.count("slices") ? ctx->args.options.at("slices").as<int>() : 2;
         lut_m = ctx->get_cell_timing_idx(id_SLG_LUT_M);
         lutl_m = ctx->get_cell_timing_idx(id_SLG_LUTL_M);
         // The site each site's carry out goes on to: the far end of its CARRY pip.
@@ -510,6 +508,13 @@ struct SlgImpl : HimbaechelAPI
                 bits.pop_back();
             if (bits.empty())
                 continue;
+            // A bit leaves its site by one pin (its slice's xMUX): the last
+            // one's sum and carry out, both taken, are one too many. A bit past
+            // it that propagates nothing (P 0) has the carry out as its sum.
+            if (used(bits.back().o) && used(bits.back().co)) {
+                bits.push_back({nullptr, nullptr, bits.back().co, nullptr});
+                bits[bits.size() - 2].co = nullptr;
+            }
             if (bits.size() > 40)
                 log_error("slg47910: the carry chain from %s is %zu bits long: a column holds 40\n",
                           head->name.c_str(ctx), bits.size());
@@ -963,6 +968,34 @@ struct SlgImpl : HimbaechelAPI
         h.replace_constants(CellTypePort(id_SLG_LUT, id_O), CellTypePort(id_SLG_LUT, id_O),
                             {{id_INIT, Property(0xFFFFFFFFFFFFFFFFull, 64)}}, {{id_INIT, Property(0x0ull, 64)}});
         pair_luts();
+        cap_slices();
+    }
+
+    // The four nodes of a slice's input pool each feed several slices of the
+    // sites around: a site with every slice full leaves its neighbours fewer to
+    // route through. So the placer fills sites as far as the design needs, as
+    // the vendor's does (its packer packs densely past half the chip,
+    // HIGH_DENSITY_PACKING_RBB_THR 50): two slices a site while the logic
+    // takes at most four fifths of them, then three or four. A slice holds a
+    // LUT, or two flip-flops of their own; a carry chain or a MUXF8 fills
+    // its sites, four bits a site.
+    void cap_slices()
+    {
+        int luts = 0, ffs = 0, carry = 0, muxf8 = 0, sites = 0;
+        for (BelId bel : ctx->getBels())
+            sites += ctx->getBelType(bel) == id_SLG_CARRY && ctx->getBelLocation(bel).z == CARRY_Z;
+        for (auto &[name, ci] : ctx->cells) {
+            carry += ci->type == id_SLG_CARRY;
+            muxf8 += ci->type == id_SLG_MUXF8;
+            if (ci->cluster != ClusterId() && getClusterRootCell(ci->cluster)->type.in(id_SLG_CARRY, id_SLG_MUXF8))
+                continue;
+            luts += ci->type == id_SLG_LUT;
+            ffs += ci->type == id_SLG_FF &&
+                   (ci->cluster == ClusterId() || getClusterRootCell(ci->cluster)->type != id_SLG_LUT);
+        }
+        int demand = luts + (ffs + 1) / 2, free = sites - (carry + 3) / 4 - muxf8;
+        slices = std::clamp((5 * demand + 4 * free - 1) / (4 * std::max(free, 1)), 2, 4);
+        log_info("slg47910: %d slices of logic in %d sites: at most %d slices a site\n", demand, free, slices);
     }
 
     // ---- validity ----
@@ -1002,9 +1035,10 @@ struct SlgImpl : HimbaechelAPI
 
     bool isBelLocationValid(BelId bel, bool explain_invalid) const override
     {
-        const CellInfo *bound = ctx->getBoundBelCell(bel);
-        if (bound == nullptr ||
-            !bound->type.in(id_SLG_LUT, id_SLG_LUTL, id_SLG_FF, id_SLG_CARRY, id_SLG_MUXF7, id_SLG_MUXF8))
+        // A bel left empty is checked too: a flip-flop moved away can leave
+        // the other of its slice taking D from the fabric, one more net on
+        // the I5 pins.
+        if (!ctx->getBelType(bel).in(id_SLG_LUT, id_SLG_LUTL, id_SLG_FF, id_SLG_CARRY, id_SLG_MUXF7, id_SLG_MUXF8))
             return true;
         Loc at = ctx->getBelLocation(bel);
         auto fail = [&](const char *why) {
@@ -1027,26 +1061,24 @@ struct SlgImpl : HimbaechelAPI
                 logic |= c && (c->cluster == ClusterId() ||
                                !getClusterRootCell(c->cluster)->type.in(id_SLG_CARRY, id_SLG_MUXF8));
             busy += lut || ff || off;
-            // A slice holds a LUT with its own flip-flop, or either alone: an
-            // unrelated LUT beside a flip-flop that takes D from the fabric packs
-            // more inputs into the pool nodes than the router can share out
-            // (9 in 10 placements of a small ALU did not route).
-            if (lut && ff && (ff->cluster == ClusterId() || ff->cluster != lut->cluster))
-                return fail("an unrelated LUT and flip-flop share a slice");
-            // XI carries one net: a flip-flop's D from the fabric, the second
-            // flip-flop's (but its slice's first flip-flop's Q), a carry's G.
-            std::set<const NetInfo *> xi;
+            // XI (MUX_xI) brings in one thing: a wide mux's select, a carry's G
+            // (a constant one too: MUX_xI holds it), or the flip-flops' D from
+            // the fabric -- the second's but where it takes the first's Q --
+            // when both take the same net (emit_sdc.py).
+            std::set<const NetInfo *> ff_xi;
             if (ff && ff->cluster == ClusterId())
-                xi.insert(ff->getPort(id_D));
+                ff_xi.insert(ff->getPort(id_D));
             if (off && !(ff && off->getPort(id_D) == ff->getPort(id_Q)))
-                xi.insert(off->getPort(id_D));
+                ff_xi.insert(off->getPort(id_D));
+            ff_xi.erase(nullptr);
+            if (ff_xi.size() > 1 || int(carry != nullptr) + int(mux != nullptr) + int(!ff_xi.empty()) > 1)
+                return fail("two cells want one slice's XI");
+            std::set<const NetInfo *> xi = ff_xi;
             if (carry)
                 xi.insert(carry->getPort(id_DI));
             if (mux)
                 xi.insert(mux->getPort(id_S));
             xi.erase(nullptr);
-            if (xi.size() > 1)
-                return fail("two nets want one slice's XI");
             // one xMUX pin: the second flip-flop's Q, the carry's sum or
             // carry, a wide mux, or the LUT's lower half
             if (int(off != nullptr) + int(carry != nullptr) + int(mux != nullptr) + int(lower != nullptr) > 1)
@@ -1061,12 +1093,10 @@ struct SlgImpl : HimbaechelAPI
                     i5.insert(f->getPort(id_R));
                 }
         }
-        // The four nodes of a slice's input pool each feed several slices of
-        // the sites around: a site with every slice full leaves its neighbours
-        // none to route through, and no router can untangle what that costs.
-        // A carry chain fills its sites (its bits take few inputs each).
+        // As many slices as the design needs (cap_slices); a carry chain
+        // fills its sites (its bits take few inputs each).
         if (logic && busy > slices)
-            return fail("more slices in use than -o slices allows");
+            return fail("more slices in use than the design needs");
         // The site's four I5 pins bring in every LUT's I5, every XI, the
         // enable and the set/reset.
         i5.erase(nullptr);
@@ -1086,9 +1116,13 @@ struct SlgImpl : HimbaechelAPI
     }
 
     // A pad is only the source of the net its input cell drives and the
-    // sink of the net its output cell takes: not a way through the pad.
+    // sink of the net its output cell takes: not a way through the pad. And
+    // no net takes a line an output pad's enable rests on (gen: REST pips):
+    // there the enable follows no net, and moved off it a pad lets go.
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override
     {
+        if (resting.count(IdString(chip_pip_info(ctx->chip_info, pip).type)))
+            return false;
         WireId src = ctx->getPipSrcWire(pip), dst = ctx->getPipDstWire(pip);
         if (ctx->getWireType(src) == id_PAD)
             return net != nullptr && ctx->getNetinfoSourceWire(net) == src;
@@ -1106,6 +1140,29 @@ struct SlgImpl : HimbaechelAPI
 
     void preRoute() override
     {
+        // The pip types of the lines the output pads' enables rest on.
+        std::set<std::pair<int, int>> outputs;
+        for (auto &[name, ci] : ctx->cells)
+            if (ci->type == id_SLG_IOB && ci->bel != BelId() && ci->ports.count(id_PAD) &&
+                ci->ports.at(id_PAD).type == PORT_IN) {
+                Loc at = ctx->getBelLocation(ci->bel);
+                outputs.insert({at.x, at.y});
+            }
+        pool<IdString> seen;
+        for (PipId pip : ctx->getPips()) {
+            IdString type(chip_pip_info(ctx->chip_info, pip).type);
+            if (!seen.insert(type).second)
+                continue;
+            std::string s = type.str(ctx);
+            if (s.compare(0, 5, "REST:") != 0)
+                continue;
+            for (size_t i = 5; i < s.size();) {
+                size_t comma = s.find(',', i), end = std::min(s.find(';', i), s.size());
+                if (outputs.count({std::stoi(s.substr(i, comma - i)), std::stoi(s.substr(comma + 1, end - comma - 1))}))
+                    resting.insert(type);
+                i = end + 1;
+            }
+        }
         // A pad on the edge can need a detour far out of its net's box.
         ctx->settings[ctx->id("router2/bbMargin/x")] = std::string("8");
         ctx->settings[ctx->id("router2/bbMargin/y")] = std::string("8");
@@ -1346,6 +1403,7 @@ struct SlgImpl : HimbaechelAPI
 
   private:
     HimbaechelHelpers h;
+    pool<IdString> resting;
     int slices = 2;
     std::map<std::pair<int, int>, std::pair<int, int>> site_above;
     std::pair<int, int> column_foot;

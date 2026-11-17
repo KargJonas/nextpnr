@@ -4,7 +4,7 @@
     slg47910_gen.py --db <forgefpga checkout> --bba chipdb-slg47910.bba
 
 The database's slg47910/graph.json is the vendor's routing graph: 364 sites,
-48,544 routing nodes (each at a grid position, each named there), 243,456 pips
+48,544 routing nodes (each at a grid position, each named there), 310,016 pips
 between nodes. It is a flat graph, so the chipdb is a thin layer over it:
 
   * one tile type per grid position (32 x 32), holding the nodes that sit
@@ -16,10 +16,8 @@ between nodes. It is a flat graph, so the chipdb is a thin layer over it:
     first wire, so every router and every report names the owner;
   * the logic of an L0 site (4 slices: a LUT6, two flip-flops, a bit of the
     carry chain) and an L6 site (an IOB) sit in their tile as bels, their
-    inputs fed from the site's pin nodes by pips, without the L1 memory views
-    and the 40 L0 sites that have one (their LUTs' I4 pins are not as
-    elsewhere, and designs placed there failed where they passed without
-    them);
+    inputs fed from the site's pin nodes by pips; the 40 L0 sites that have an
+    L1 memory view are logic sites too (BEL_FLAG_MEMORY), without it;
   * each slice's LUT6 as two LUTs: the upper half, and the lower half out by
     the slice's xMUX pin;
   * the site's wide muxes: MUXF7 (A or B, C or D) and MUXF8 (of the two);
@@ -27,12 +25,15 @@ between nodes. It is a flat graph, so the chipdb is a thin layer over it:
     pip, to slice A of the next site up its column (the vendor's CIN/COUT);
   * the three dedicated clock inputs (W0, N0, N1) are bels at (0, 0) whose
     pad wire reaches every L0 site's CLK through one GCLK pip.
+  * a pip into a line an output pad's enable rests on (graph.json's `rest`)
+    has the type `REST:x,y;...`, the pads whose it is.
 
 A wire's type says what the emitter needs of it: `SPI_<k>` and `SPO_<k>` are
 the site pins' k-th input and output, `SM` any other node.
 """
 
 import argparse
+from collections import defaultdict
 import json
 import os
 import re
@@ -163,6 +164,14 @@ def main():
         m = re.fullmatch(r"([UD])(\d+)B(\d+)N(\d+)", wires[nid]["name"])
         return (int(m[2]), m[1], int(m[3]), int(m[4])) if m else None
 
+    # The pips into the lines an output pad's enable rests on (graph.json's
+    # `rest`) say whose they are, `REST:x,y;...`: no net takes them while
+    # that pad is an output (the uarch's checkPipAvailForNet).
+    rests = defaultdict(list)
+    for s in sites:
+        for nid in s.get("rest", []):
+            rests[nid].append(f"{s['x']},{s['y']}")
+
     seen = set()
     for p in db["pips"]:
         if (p["src"], p["dst"]) in seen:
@@ -173,7 +182,8 @@ def main():
         seen.add((p["src"], p["dst"]))
         d = wires[p["dst"]]
         stated = f"out:L/RBB_6L/o{out_port[p['src']]}>{d['name']}" if p["src"] in out_port else f"{d['x']},{d['y']},{a['name']},{d['name']}"
-        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], "PIP", stated)
+        kind = "REST:" + ";".join(rests[p["dst"]]) if p["dst"] in rests else "PIP"
+        pip(by_tile[(d["x"], d["y"])], local(d["x"], d["y"], p["src"]), d["name"], kind, stated)
 
     # The dedicated clock inputs, at (0, 0): the pad wire of each is a node
     # that every L0 site's CLK is one pip from.
