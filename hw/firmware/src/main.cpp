@@ -137,5 +137,41 @@ void loop() {
         Serial.println(digitalRead(CONFIG_PIN));
     } else if (cmd == "PING") {
         Serial.println("PONG");
+    } else if (cmd.startsWith("PIN ")) {
+        // PIN <rp2040 gpio> <0|1>  ->  OK: drive an MCU pin (a design's reset, say)
+        int sp = cmd.indexOf(' ', 4);
+        int pin = cmd.substring(4, sp).toInt(), v = cmd.substring(sp + 1).toInt();
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, v ? HIGH : LOW);
+        Serial.println("OK");
+    } else if (cmd.startsWith("XFER ")) {
+        // XFER <hex byte> ...  ->  RX <hex byte> ...: to the loaded design over
+        // the configuration SPI (mode 0, 1 MHz, MSB first), each byte with a
+        // select of its own and 10 ms after it, as Vicharak's examples talk to
+        // theirs. After it SPI is as ShrikeFlash::begin left it (the next FLASH
+        // needs it), and MISO (GPIO0) is the CONFIG pin again.
+        SPI.end();
+        pinMode(1, OUTPUT);
+        digitalWrite(1, HIGH);
+        SPI.setSCK(2);
+        SPI.setTX(3);
+        SPI.setRX(0);
+        SPI.begin();
+        Serial.print("RX");
+        for (int i = 5; i + 1 < (int)cmd.length(); i += 3) {
+            uint8_t b = (uint8_t)strtol(cmd.substring(i, i + 2).c_str(), nullptr, 16);
+            digitalWrite(1, LOW);
+            SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+            uint8_t r = SPI.transfer(b);
+            SPI.endTransaction();
+            digitalWrite(1, HIGH);
+            Serial.printf(" %02X", r);
+            delay(10);
+        }
+        Serial.println();
+        SPI.end();
+        SPI.setCS(1);
+        SPI.begin();
+        pinMode(CONFIG_PIN, INPUT);
     }
 }
