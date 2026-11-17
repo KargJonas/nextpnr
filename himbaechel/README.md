@@ -59,11 +59,19 @@ AN-FG-019): `PLL_LOCK`, by the second input of RBB_0_12, and `OSC_READY`, by
 the first of RBB_0_25. A design reads them as inputs the pin file names as the
 controls are named (`set_io PLL_LOCK PLL_LOCK`). Each leaves its pad by that
 input's pin, past the pad's input register (one bit each, emit_sdc.py
-`_STATUS_INPUT_BIT`: left set, the input passes the register on domain 1 and
-reads 0). On the Shrike PLL_LOCK rises 13 us after EN does and falls with it,
-and OSC_READY reads 1; straight to a pad, through a LUT and through a
+`input_bits`: left set, the input passes the register on a domain no clock
+drives and reads 0). On the Shrike PLL_LOCK rises 13 us after EN does and falls
+with it, and OSC_READY reads 1; straight to a pad, through a LUT and through a
 flip-flop. The encoding was read from Kraken's vendor builds of design set
 `status`: each input read alone, both, through a LUT and through a flip-flop.
+
+A GPIO the design reads is its pad's first input, by the same way: the pad's
+O4 pin, and the same bit at the pad's place (WL16, at the tile and BL its
+enable has). Kraken's vendor builds of design set `gpioall` (each of eight
+reading a random half of the pads) give it for every GPIO pad but GPIO8. On
+the Shrike GPIO6 reads its pull-up, as the vendor's image of the same design
+does. No other pad has been read on silicon: the analyser's pins are inputs
+too.
 
 ## Timing
 

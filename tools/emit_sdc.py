@@ -265,7 +265,7 @@ _WEST_IOB_OUTPUT_NVM_BITS = {
 # nextpnr routes OE through any branch other than BSEL.  The override is
 # applied via the direct-NVM tier in pack.py so it trumps the conflicting
 # edge-mux write.
-# Row-31 pad -> (tile, bl) of its enable bits: the pad's own tile at bl9 when
+# Row-31 pad -> (tile, bl) of its bits (its enable's, its inputs'): the pad's own tile at bl9 when
 # it is single, else the even tile of its pair (8/9, 22/23, 24/25). GPIO17
 # and GPIO18 (4, 5) each at its own (Kraken's builds of design set top45,
 # 2026-11-17; not on the Shrike's analyser, so not seen on silicon).
@@ -536,27 +536,30 @@ def emit_direct_nvm_bit(f, reg, bit, value):
         f.write(f"set_case_analysis {value} TILE_00/RAW_W{reg}_B{bit}\n")
 
 
-# What the chip states to the fabric at a pad of its own (app note AN-FG-019),
-# by RBB_<row>_<col> and the pad input it comes by -> the bit, (tile x, y, BL,
-# WL), that takes the input past the pad's input register: the vendor's builds
-# of the status set (Kraken harness eda-placer, 2026-11-17) clear it wherever
-# the input goes to the fabric, and leave it set only where they pack the
-# flip-flop it feeds into the pad (`ready_ff`: the pad's CLK_SEL then follows
-# that flip-flop's domain). Left set, the input passes the register on domain
-# 1, which no clock drives in a design on W0, and reads 0 on silicon; cleared,
-# PLL_LOCK follows the PLL's enable (13 us behind it) and OSC_READY reads 1,
-# straight, through a LUT and through a flip-flop (2026-11-17).
-_STATUS_INPUT_BIT = {
-    (0, 12, 1): (12, 0, 9, 23),    # PLL_LOCK
-    (0, 25, 0): (24, 0, 10, 16),   # OSC_READY
-}
+# Row-0 pad -> (tile, bl) of its bits, as _EAST_PAD_ENABLE_TILE is row 31's:
+# here 6/7 pair too, and 10 and 12 are single.
+_WEST_PAD_TILE = {6: (6, 9), 7: (6, 10), 8: (8, 9), 9: (8, 10), 10: (10, 9), 12: (12, 9), 22: (22, 9),
+                  23: (22, 10), 24: (24, 9), 25: (24, 10)}
 
 
-def status_input_bits(row, col, k):
-    """The bits that let what the chip states reach the fabric by input k of pad RBB_<row>_<col>."""
-    if (row, col, k) not in _STATUS_INPUT_BIT:
-        raise UnsupportedBackendFeature(f"pad RBB_{row}_{col} input {k} carries no status the chip states")
-    return [(*_word_bit(*_STATUS_INPUT_BIT[(row, col, k)]), 0)]
+def input_bits(row, col, k):
+    """The bit that takes input k of pad RBB_<row>_<col> (0: what the pad
+    reads, by O4; 1 by O5) past the pad's input register, to the fabric: WL16
+    (input 0) or WL23 (input 1) at the pad's (tile, BL). The vendor's builds
+    clear it wherever the input goes to the fabric, and leave it set only where
+    they pack the flip-flop it feeds into the pad (its CLK_SEL then that
+    flip-flop's domain): design sets status (PLL_LOCK, OSC_READY), gpioin and
+    gpioall (every GPIO pad but GPIO8 read, each bit the inverse of its pad's
+    in_GPIO<n> in eight builds), Kraken harness eda-placer, 2026-11-17. Left
+    set, the input passes the register on a domain no clock drives and reads 0
+    on silicon. Cleared, GPIO6 reads its pull-up as the vendor's image does,
+    PLL_LOCK follows the PLL's enable (13 us behind it) and OSC_READY reads 1
+    (2026-11-17)."""
+    tiles = _WEST_PAD_TILE if row == 0 else _EAST_PAD_ENABLE_TILE if row == 31 else {}
+    if col not in tiles:
+        raise UnsupportedBackendFeature(f"input {k} of pad RBB_{row}_{col} is not RE-backed")
+    tile, bl = tiles[col]
+    return [(*_word_bit(tile, row, bl, 16 if k == 0 else 23), 0)]
 
 
 def held_control_bits(held):
@@ -1299,8 +1302,10 @@ def emit_sdc(placement, out_file):
                     f"IOB at ({gx},{gy}) uses bidirectional PAD mode, which is not yet RE-backed"
                 )
 
-            for k in iob.get('status', []):
-                for reg, bit, value in status_input_bits(gx, gy, int(k)):
+            # What the pad reads (input 0, by O4) and what the chip states at it.
+            reads = [0] if direction == 'input' and iob.get('pad_out_pin', -1) >= 0 else []
+            for k in reads + [int(k) for k in iob.get('status', [])]:
+                for reg, bit, value in input_bits(gx, gy, k):
                     emit_direct_nvm_bit(f, reg, bit, value)
 
             if direction != 'output':
