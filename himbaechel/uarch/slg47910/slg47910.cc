@@ -80,6 +80,7 @@ struct Control
 {
     int row, col, out;
 };
+const std::map<std::string, Control> &bram_pins();
 const std::map<std::string, Control> &control_names()
 {
     static const std::map<std::string, Control> t = [] {
@@ -96,6 +97,9 @@ const std::map<std::string, Control> &control_names()
             m["PLL_CTRL_FBDIV[" + std::to_string(k) + "]"] = {0, 12 + k / 2, k % 2};
         for (int k = 0; k < 6; k++)
             m["PLL_CTRL_REFDIV[" + std::to_string(k) + "]"] = {31, 19 + k / 2, k % 2};
+        for (auto &[name, c] : bram_pins())
+            if (name.find("RDATA") == std::string::npos)
+                m[name] = c;
         return m;
     }();
     return t;
@@ -107,7 +111,88 @@ const std::map<std::string, Control> &control_names()
 // it writes nothing at the pad for them.
 const std::map<std::string, Control> &status_names()
 {
-    static const std::map<std::string, Control> t = {{"PLL_LOCK", {0, 12, 1}}, {"OSC_READY", {0, 25, 0}}};
+    static const std::map<std::string, Control> t = [] {
+        std::map<std::string, Control> m = {{"PLL_LOCK", {0, 12, 1}}, {"OSC_READY", {0, 25, 0}}};
+        for (auto &[name, c] : bram_pins())
+            if (name.find("RDATA") != std::string::npos)
+                m[name] = c;
+        return m;
+    }();
+    return t;
+}
+
+// The BRAM's pins (datasheet 9.2, Table 12), by the names of GoConfigure's io
+// planner, upper-cased as the pin file is read (BRAM0_NWEN, BRAM0_WDATA[3],
+// ...): slice k's pin -> RBB_<row>_<col> and which output, or which input for
+// RDATA. Read from the io planner of Vicharak's shrike_serv, which pins every
+// pin of all eight slices and runs on a Shrike; slices 4-7 (south) are 0-3
+// (north) with the column mirrored. Each write port's pins are a control's,
+// held at a constant or routed; each RDATA bit a status's.
+const std::map<std::string, Control> &bram_pins()
+{
+    static const std::map<std::string, Control> t = [] {
+        // nWEN nWCLKEN nREN nRCLKEN RATIO[0..1] WDATA[0..7] WADDR[0..8] RADDR[0..8] RDATA[0..7]
+        static const int north[4][40][3] = {
+            {{0, 26, 0}, {0, 26, 1}, {0, 27, 0}, {0, 27, 1}, {0, 28, 0}, {0, 28, 1}, {1, 31, 1}, {1, 31, 0},
+             {1, 30, 1}, {1, 30, 0}, {0, 31, 1}, {0, 31, 0}, {0, 30, 1}, {0, 30, 0}, {4, 30, 0}, {3, 31, 1},
+             {3, 31, 0}, {3, 30, 1}, {3, 30, 0}, {2, 31, 1}, {2, 31, 0}, {2, 30, 1}, {2, 30, 0}, {6, 30, 1},
+             {6, 30, 0}, {5, 31, 1}, {5, 31, 0}, {5, 30, 1}, {5, 30, 0}, {4, 31, 1}, {4, 31, 0}, {4, 30, 1},
+             {1, 31, 1}, {1, 31, 0}, {1, 30, 1}, {1, 30, 0}, {0, 31, 1}, {0, 31, 0}, {0, 30, 1}, {0, 30, 0}},
+            {{7, 30, 0}, {7, 30, 1}, {7, 31, 0}, {7, 31, 1}, {8, 30, 1}, {8, 30, 0}, {10, 31, 1}, {10, 31, 0},
+             {10, 30, 1}, {10, 30, 0}, {9, 31, 1}, {9, 31, 0}, {9, 30, 1}, {9, 30, 0}, {13, 30, 0}, {12, 31, 1},
+             {12, 31, 0}, {12, 30, 1}, {12, 30, 0}, {11, 31, 1}, {11, 31, 0}, {11, 30, 1}, {11, 30, 0}, {15, 30, 1},
+             {15, 30, 0}, {14, 31, 1}, {14, 31, 0}, {14, 30, 1}, {14, 30, 0}, {13, 31, 1}, {13, 31, 0}, {13, 30, 1},
+             {8, 31, 1}, {8, 31, 0}, {8, 30, 1}, {8, 30, 0}, {7, 31, 1}, {7, 31, 0}, {6, 31, 1}, {6, 31, 0}},
+            {{15, 31, 0}, {15, 31, 1}, {16, 30, 0}, {16, 30, 1}, {16, 31, 1}, {16, 31, 0}, {19, 30, 1}, {19, 30, 0},
+             {18, 31, 1}, {18, 31, 0}, {18, 30, 1}, {18, 30, 0}, {17, 31, 1}, {17, 31, 0}, {21, 31, 0}, {21, 30, 1},
+             {21, 30, 0}, {20, 31, 1}, {20, 31, 0}, {20, 30, 1}, {20, 30, 0}, {19, 31, 1}, {19, 31, 0}, {23, 31, 1},
+             {23, 31, 0}, {23, 30, 1}, {23, 30, 0}, {22, 31, 1}, {22, 31, 0}, {22, 30, 1}, {22, 30, 0}, {21, 31, 1},
+             {15, 30, 1}, {15, 30, 0}, {14, 31, 1}, {14, 31, 0}, {14, 30, 1}, {14, 30, 0}, {13, 31, 1}, {13, 31, 0}},
+            {{24, 31, 0}, {24, 31, 1}, {25, 30, 0}, {25, 30, 1}, {25, 31, 1}, {25, 31, 0}, {28, 30, 1}, {28, 30, 0},
+             {27, 31, 1}, {27, 31, 0}, {27, 30, 1}, {27, 30, 0}, {26, 31, 1}, {26, 31, 0}, {30, 31, 0}, {30, 30, 1},
+             {30, 30, 0}, {29, 31, 1}, {29, 31, 0}, {29, 30, 1}, {29, 30, 0}, {28, 31, 1}, {28, 31, 0}, {31, 28, 1},
+             {31, 28, 0}, {31, 29, 1}, {31, 29, 0}, {31, 31, 1}, {31, 31, 0}, {31, 30, 1}, {31, 30, 0}, {30, 31, 1},
+             {22, 30, 1}, {22, 30, 0}, {21, 31, 1}, {21, 31, 0}, {21, 30, 1}, {21, 30, 0}, {20, 31, 1}, {20, 31, 0}},
+        };
+        std::vector<std::string> names = {"NWEN", "NWCLKEN", "NREN", "NRCLKEN"};
+        for (auto &[bus, width] : std::vector<std::pair<std::string, int>>{
+                     {"RATIO", 2}, {"WDATA", 8}, {"WADDR", 9}, {"RADDR", 9}, {"RDATA", 8}})
+            for (int i = 0; i < width; i++)
+                names.push_back(bus + "[" + std::to_string(i) + "]");
+        std::map<std::string, Control> m;
+        for (int k = 0; k < 8; k++)
+            for (int i = 0; i < 40; i++) {
+                const int *p = north[k % 4][i];
+                m["BRAM" + std::to_string(k) + "_" + names[i]] = {p[0], k < 4 ? p[1] : 31 - p[1], p[2]};
+            }
+        return m;
+    }();
+    return t;
+}
+
+// Whether RBB_<row>_<col> is one of the BRAM's pads: those keep their bits in
+// a layout of their own (emit_sdc.py).
+bool is_bram_pad(int row, int col)
+{
+    static const std::set<std::pair<int, int>> pads = [] {
+        std::set<std::pair<int, int>> s;
+        for (auto &[name, c] : bram_pins())
+            s.insert({c.row, c.col});
+        return s;
+    }();
+    return pads.count({row, col});
+}
+
+// A BRAM block's clocks leave the fabric by a side's clock outputs (datasheet
+// table 10: N out0 the north write clock, out1 its read clock; S the south's),
+// each through a clock mux that takes one of the clock inputs: the pin file
+// names an output port that carries a clock input's net. The vendor's builds
+// set CLK_4..CLK_7 for N out0, N out1, S out0, S out1 (AN-011's: north read
+// clock on E input 0, write clock on E input 1; Kraken's bram set).
+const std::map<std::string, int> &bram_clock_names()
+{
+    static const std::map<std::string, int> t = {
+            {"BRAM_N_WCLK", 4}, {"BRAM_N_RCLK", 5}, {"BRAM_S_WCLK", 6}, {"BRAM_S_RCLK", 7}};
     return t;
 }
 
@@ -220,6 +305,16 @@ struct SlgImpl : HimbaechelAPI
     };
     std::vector<Held> held_controls; // a control held at a constant: the pad holds it, nothing routes
     std::map<std::pair<int, int>, CellInfo *> control_cells; // (row, col) -> the pad cell of driven controls
+    // port -> the clock mux of a BRAM clock it carries: a clock input's port,
+    // or an output port that carries a clock input's net
+    std::vector<std::pair<std::string, int>> bram_clock_ports;
+    struct BramClock
+    {
+        int mux;
+        std::string token;
+    };
+    std::vector<BramClock> bram_clocks; // a BRAM clock output and the clock input it takes
+    std::set<char> bram_blocks;         // the BRAM blocks a design uses: N (slices 0-3), S (4-7)
 
     BelId iob_at(int row, int col, const std::string &where)
     {
@@ -260,6 +355,15 @@ struct SlgImpl : HimbaechelAPI
                 clock_ports[port] = where;
             } else if (keyword == "set_io") {
                 int row, col;
+                if (where.rfind("BRAM", 0) == 0)
+                    bram_blocks.insert(where[4] == '_' ? where[5] : where[4] < '4' ? 'N' : 'S');
+                auto bclk = bram_clock_names().find(where);
+                if (bclk != bram_clock_names().end()) {
+                    if (!taken.insert({-1, bclk->second, 0}).second)
+                        log_error("slg47910: %s: %s taken twice\n", at.c_str(), where.c_str());
+                    bram_clock_ports.push_back({port, bclk->second});
+                    continue;
+                }
                 auto gpio = gpio_names().find(where);
                 auto control = control_names().find(where);
                 if (control != control_names().end()) {
@@ -339,6 +443,13 @@ struct SlgImpl : HimbaechelAPI
                 if (port.type != PORT_IN)
                     log_error("slg47910: %s reads what the chip states: it must be an input\n", pname.c_str());
                 statuses.push_back({pname, port.net});
+                used.insert(pname);
+                continue;
+            }
+            if (!clock_ports.count(pname) && std::any_of(bram_clock_ports.begin(), bram_clock_ports.end(),
+                                                         [&](auto &b) { return b.first == pname; })) {
+                if (port.type != PORT_OUT)
+                    log_error("slg47910: %s carries a BRAM clock: it must be an output\n", pname.c_str());
                 used.insert(pname);
                 continue;
             }
@@ -462,6 +573,20 @@ struct SlgImpl : HimbaechelAPI
         }
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
+        // A BRAM clock output takes its port's clock input, or the clock input
+        // whose net its port carries.
+        for (auto &[pname, mux] : bram_clock_ports) {
+            const NetInfo *net = ctx->ports.count(ctx->id(pname)) ? ctx->ports.at(ctx->id(pname)).net : nullptr;
+            std::string token = clock_ports.count(pname) ? clock_ports.at(pname) : "";
+            for (auto &[cport, t] : clock_ports)
+                if (token.empty() && net != nullptr && ctx->ports.count(ctx->id(cport)) &&
+                    ctx->ports.at(ctx->id(cport)).net == net)
+                    token = t;
+            if (token.empty())
+                log_error("slg47910: %s carries no clock input's net: a BRAM clock is a clock input\n",
+                          pname.c_str());
+            bram_clocks.push_back({mux, token});
+        }
         for (auto &[port, bel] : io_bels)
             if (!used.count(port))
                 log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
@@ -471,6 +596,9 @@ struct SlgImpl : HimbaechelAPI
         for (auto &[port, token] : clock_ports)
             if (!used.count(port))
                 log_error("slg47910: the pin file names a clock port %s the design has not\n", port.c_str());
+        for (auto &[port, mux] : bram_clock_ports)
+            if (!used.count(port))
+                log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
     }
 
     static int lut_inputs(IdString type)
@@ -1619,13 +1747,20 @@ struct SlgImpl : HimbaechelAPI
         first = true;
         for (auto &h : held_controls) {
             f << (first ? "\n" : ",\n") << "  {\"x\":" << h.x << ",\"y\":" << h.y << ",\"out\":" << h.out
-              << ",\"value\":" << h.value << "}";
+              << ",\"value\":" << h.value << ",\"bram\":" << int(is_bram_pad(h.y, h.x)) << "}";
             first = false;
         }
+        f << "\n],\n\"bram_clocks\": [";
+        first = true;
+        for (auto &b : bram_clocks) {
+            f << (first ? "\n" : ",\n") << "  {\"mux\":" << b.mux << ",\"token\":\"" << b.token << "\"}";
+            first = false;
+        }
+        f << "\n],\n\"brams\": \"" << std::string(bram_blocks.begin(), bram_blocks.end()) << "\"";
         std::map<std::string, int> domains;
         for (auto &[net, c] : clocks)
             domains[net] = c.domain;
-        f << "\n],\n\"iobs\": [";
+        f << ",\n\"iobs\": [";
         first = true;
         for (auto &[name, ci] : ctx->cells) {
             if (ci->type != id_SLG_IOB || ci->bel == BelId())
@@ -1643,6 +1778,7 @@ struct SlgImpl : HimbaechelAPI
               << ",\"pad_in_sm\":\""
               << (route == WireId() ? "" : ctx->getWireName(route).str(ctx)) << "\",\"net\":\""
               << json_escape(net_of(ci.get(), id_PAD)) << "\",\"control\":" << int(ci->attrs.count(ctx->id("CONTROL")))
+              << ",\"bram\":" << int(is_bram_pad(loc.y, loc.x))
               << ",\"oe_sm\":\"" << (oe == WireId() ? "" : ctx->getWireName(oe).str(ctx)) << "\",\"oe_net\":\""
               << json_escape(net_of(ci.get(), id_OE)) << "\",\"domain\":"
               << (type == PORT_IN ? output_domain(ci.get(), domains) : 0) << ",\"inputs\":[";
