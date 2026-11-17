@@ -1212,8 +1212,13 @@ struct SlgImpl : HimbaechelAPI
 
     // A LUT placed in a memory site takes the memory layer's arcs: the vendor
     // times its LUTs 0.4-1.1 ns slower after routing (timing.json's LUT_M).
+    // A LUT whose output feeds back into it is a latch (the flow's
+    // latch_map.v, as the vendor builds one): that input times no path.
     bool getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const override
     {
+        if (cell->type.in(id_SLG_LUT, id_SLG_LUTL) && cell->getPort(fromPort) != nullptr &&
+            cell->getPort(fromPort) == cell->getPort(toPort))
+            return false;
         if (cell->bel != BelId() && (cell->type == id_SLG_LUT || cell->type == id_SLG_LUTL) &&
             (chip_bel_info(ctx->chip_info, cell->bel).flags & BEL_FLAG_MEMORY))
             return ctx->lookup_cell_delay(cell->type == id_SLG_LUT ? lut_m : lutl_m, fromPort, toPort, delay);
