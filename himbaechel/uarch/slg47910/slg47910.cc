@@ -314,8 +314,13 @@ struct SlgImpl : HimbaechelAPI
     void pack_io()
     {
         std::vector<IdString> gone;
+        // An inout's buffer splits its net: what drives the port is on the
+        // buffer's I, the port's readers on its O (the port's net).
+        std::map<NetInfo *, NetInfo *> driven_by;
         for (auto &[name, ci] : ctx->cells)
             if (ci->type.in(ctx->id("$nextpnr_ibuf"), ctx->id("$nextpnr_obuf"), ctx->id("$nextpnr_iobuf"))) {
+                if (ci->type == ctx->id("$nextpnr_iobuf") && ci->getPort(id_O) && ci->getPort(id_I))
+                    driven_by[ci->getPort(id_O)] = ci->getPort(id_I);
                 ci->disconnectPort(id_I);
                 ci->disconnectPort(id_O);
                 gone.push_back(name);
@@ -383,18 +388,47 @@ struct SlgImpl : HimbaechelAPI
                 continue;
             }
             auto cell = std::make_unique<CellInfo>(ctx, ctx->idf("$io_%s", pname.c_str()), id_SLG_IOB);
-            if (port.type == PORT_IN)
-                cell->addOutput(id_PAD);
-            else if (port.type == PORT_OUT)
-                cell->addInput(id_PAD);
-            else
-                cell->addInout(id_PAD);
+            if (io_bels.count(pname)) {
+                cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(io_bels.at(pname)));
+                used.insert(pname);
+            }
+            // What a pad reads is its first input, IN0 (the vendor's Input=0,
+            // by O4). A pad the design both drives and reads is driven by a
+            // tristate buffer (flow.sh keeps one that drives a port: tribuf
+            // -logic): its data goes to PAD, its enable to OE, and the port's
+            // net, which the readers are on, to IN0.
+            if (port.type != PORT_OUT) {
+                CellInfo *tb = driven_by.count(port.net) ? driven_by.at(port.net)->driver.cell : nullptr;
+                if (port.type == PORT_INOUT) {
+                    if (tb == nullptr || tb->type != ctx->id("$_TBUF_"))
+                        log_error("slg47910: the inout %s is not driven by a tristate buffer\n", pname.c_str());
+                    NetInfo *data = tb->getPort(ctx->id("A")), *en = tb->getPort(ctx->id("E"));
+                    for (const char *pin : {"A", "E", "Y"})
+                        tb->disconnectPort(ctx->id(pin));
+                    ctx->cells.erase(tb->name);
+                    const CellInfo *edrv = en ? en->driver.cell : nullptr;
+                    bool off = en == nullptr || (edrv && edrv->type == ctx->id("GND"));
+                    if (!off) {
+                        cell->addInput(id_PAD);
+                        cell->connectPort(id_PAD, data);
+                    }
+                    if (!off && !(edrv && edrv->type == ctx->id("VCC"))) {
+                        cell->addInput(id_OE);
+                        cell->connectPort(id_OE, en);
+                    }
+                }
+                cell->addOutput(id_IN0);
+                cell->connectPort(id_IN0, port.net);
+                made.push_back(std::move(cell));
+                continue;
+            }
+            cell->addInput(id_PAD);
             // A pad held at a constant has a constant of its own, which the
             // placer can put beside it: the design's one would be wherever its
             // many flip-flops' enables want it.
             const CellInfo *driver = port.net->driver.cell;
             bool vcc = driver && driver->type == ctx->id("VCC"), gnd = driver && driver->type == ctx->id("GND");
-            if (port.type == PORT_OUT && (vcc || gnd)) {
+            if (vcc || gnd) {
                 auto lut = std::make_unique<CellInfo>(ctx, ctx->idf("$const_%s", pname.c_str()), id_SLG_LUT);
                 lut->params[id_INIT] = Property(vcc ? 0xFFFFFFFFFFFFFFFFull : 0ull, 64);
                 lut->params[id_LUT_MODE] = Property("LUT5");
@@ -405,10 +439,6 @@ struct SlgImpl : HimbaechelAPI
                 made.push_back(std::move(lut));
             } else
                 cell->connectPort(id_PAD, port.net);
-            if (io_bels.count(pname)) {
-                cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(io_bels.at(pname)));
-                used.insert(pname);
-            }
             made.push_back(std::move(cell));
         }
         // What the chip states leaves its pad by one of the pad's inputs: an
@@ -1321,17 +1351,15 @@ struct SlgImpl : HimbaechelAPI
         return true;
     }
 
-    // A pad is only the source of the net its input cell drives and the
-    // sink of the net its output cell takes: not a way through the pad. And
-    // no net takes a line an output pad's enable rests on (gen: REST pips):
-    // there the enable follows no net, and moved off it a pad lets go.
+    // A pad is only the sink of the net its output cell takes: not a way
+    // through the pad. And no net takes a line an output pad's enable rests on
+    // (gen: REST pips): there the enable follows no net, and moved off it a
+    // pad lets go.
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override
     {
         if (resting.count(IdString(chip_pip_info(ctx->chip_info, pip).type)))
             return false;
-        WireId src = ctx->getPipSrcWire(pip), dst = ctx->getPipDstWire(pip);
-        if (ctx->getWireType(src) == id_PAD)
-            return net != nullptr && ctx->getNetinfoSourceWire(net) == src;
+        WireId dst = ctx->getPipDstWire(pip);
         if (ctx->getWireType(dst) == id_PAD) {
             if (net == nullptr)
                 return false;
@@ -1603,25 +1631,22 @@ struct SlgImpl : HimbaechelAPI
             if (ci->type != id_SLG_IOB || ci->bel == BelId())
                 continue;
             Loc loc = ctx->getBelLocation(ci->bel);
-            auto port = ci->ports.find(id_PAD);
-            // a pad of driven chip controls may drive only its second output
-            // (OE), and one of what the chip states only the fabric (IN0, IN1)
-            PortType type = port != ci->ports.end() ? port->second.type
-                            : ci->ports.count(id_OE)  ? PORT_IN
-                                                      : PORT_OUT;
-            const char *dir = type == PORT_IN ? "output" : type == PORT_OUT ? "input" : "inout";
+            // A pad drives (its PAD, or only its OE: a pad of driven chip
+            // controls) or only reads (IN0, IN1).
+            PortType type = ci->ports.count(id_PAD) || ci->ports.count(id_OE) ? PORT_IN : PORT_OUT;
+            const char *dir = type == PORT_IN ? "output" : "input";
             WireId pad = ctx->getBelPinWire(ci->bel, id_PAD);
             WireId route = uphill_bound(uphill_bound(pad));
             WireId oe = uphill_bound(uphill_bound(ctx->getBelPinWire(ci->bel, id_OE)));
             f << (first ? "\n" : ",\n") << "  {\"name\":\"" << json_escape(name.str(ctx)) << "\",\"gx\":" << loc.x
               << ",\"gy\":" << loc.y << ",\"dir\":\"" << dir << "\",\"pad_in_pin\":" << in_pin(ci->bel, id_PAD)
-              << ",\"pad_out_pin\":" << pin_of(downhill_bound(pad), "SPO_") << ",\"pad_in_sm\":\""
+              << ",\"pad_in_sm\":\""
               << (route == WireId() ? "" : ctx->getWireName(route).str(ctx)) << "\",\"net\":\""
               << json_escape(net_of(ci.get(), id_PAD)) << "\",\"control\":" << int(ci->attrs.count(ctx->id("CONTROL")))
               << ",\"oe_sm\":\"" << (oe == WireId() ? "" : ctx->getWireName(oe).str(ctx)) << "\",\"oe_net\":\""
               << json_escape(net_of(ci.get(), id_OE)) << "\",\"domain\":"
-              << (type == PORT_IN ? output_domain(ci.get(), domains) : 0) << ",\"status\":[";
-            // the pad's inputs that carry what the chip states (status_names)
+              << (type == PORT_IN ? output_domain(ci.get(), domains) : 0) << ",\"inputs\":[";
+            // the pad's inputs the fabric reads (what it reads, what the chip states)
             bool any = false;
             for (int k = 0; k < 2; k++)
                 if (ci->getPort(k ? id_IN1 : id_IN0) != nullptr)
