@@ -45,10 +45,16 @@ def podman(cmd, cwd):
                            "-w", str(cwd), IMAGE, "bash", "-c", cmd], capture_output=True, text=True)
 
 
+# Flip-flop cells (Yosys's internal ones after proc): a clock's cone stops at them.
+FFS = "$dff,$adff,$dffe,$adffe,$sdff,$sdffe,$sdffce,$dffsr,$dffsre,$aldff,$aldffe"
+
+
 def ports(src, top, out):
-    """The design's top (`-`: the one Yosys finds) and its ports."""
+    """The design's top (`-`: the one Yosys finds), its ports, and the inputs
+    whose logic reaches a flip-flop's clock not through another flip-flop."""
     pick = "-auto-top" if top == "-" else f"-top {top}"
-    r = podman(f"yosys -q -p 'read_verilog -sv {src}; hierarchy {pick}; proc; write_json ports.json'", out)
+    r = podman(f"yosys -q -p 'read_verilog -sv {src}; hierarchy {pick}; proc; write_json ports.json; flatten; opt_clean; "
+               f"select -write clocked.txt t:$*dff* %x:+[CLK] %ci*:-{FFS} i:* %i'", out)
     if r.returncode:
         raise RuntimeError("yosys: " + (r.stderr or r.stdout).strip().splitlines()[-1])
     mods = json.load(open(out / "ports.json"))["modules"]
@@ -65,7 +71,8 @@ def ports(src, top, out):
         raise RuntimeError("no output port: nothing to check")
     if any(not re.fullmatch(r"\w+", n) for n, _, _ in plist):
         raise RuntimeError("a port name the wrapper cannot write")
-    return top, plist
+    clocked = {line.strip().split("/", 1)[1] for line in open(out / "clocked.txt") if line.startswith(f"{top}/")}
+    return top, plist, clocked - {n for n, _, _ in plist if CLOCKS.match(n)}
 
 
 def pll(mhz):
@@ -90,7 +97,13 @@ PLL_PORTS = [("PLL_CTRL_EN", 1), ("PLL_CTRL_BYPASS", 1), ("PLL_REF_CLK_SELECTION
              ("PLL_CTRL_REFDIV", 6), ("PLL_CTRL_POSTDIV1", 3), ("PLL_CTRL_POSTDIV2", 3)]
 
 
-def wrapper(top, plist, cycles, golden, start=0, only=None, left=(), record=False, dividers=None):
+def wrapper(top, plist, cycles, golden, start=0, only=None, left=(), record=False, dividers=None, clocked=()):
+    """The self-test around a design. An input that reaches a flip-flop's
+    clock (`clocked`) changes on every other cycle and the others between: on
+    the edge where both change, which data such a flip-flop takes is a race,
+    which Yosys's sim and the chip decide each its own way (sim the value
+    before the edge; the chip, its clock coming back the long way, the value
+    after)."""
     ins = [(n, w) for n, d, w in plist if d == "input" and not CLOCKS.match(n)]
     outs = [(n, w) for n, d, w in plist if d == "output"]
     clocks = [n for n, d, w in plist if d == "input" and CLOCKS.match(n)]
@@ -110,13 +123,17 @@ def wrapper(top, plist, cycles, golden, start=0, only=None, left=(), record=Fals
             bits.append(f"lfsr[{bit % 32}]")
             bit += 7
         value = "{" + ", ".join(reversed(bits)) + "}" if w > 1 else bits[0]
+        phase = "" if not clocked else "if (n[0]) " if name in clocked else "if (!n[0]) "
         if RESETS.match(name) or RESETS_N.match(name):
             # Held for the first 16 cycles, and from a flip-flop: an
             # asynchronous reset sees every glitch of a LUT, which no
             # simulation of cycles does.
             held = "1'b1" if RESETS.match(name) else "1'b0"
             lines.append(f"    reg [{w - 1}:0] in_{name} = {{{w}{{{held}}}}};")
-            lines.append(f"    always @(posedge clk) in_{name} <= early ? {{{w}{{{held}}}}} : {value};")
+            lines.append(f"    always @(posedge clk) {phase}in_{name} <= early ? {{{w}{{{held}}}}} : {value};")
+        elif clocked:
+            lines.append(f"    reg [{w - 1}:0] in_{name} = 0;")
+            lines.append(f"    always @(posedge clk) {phase}in_{name} <= {value};")
         else:
             lines.append(f"    wire [{w - 1}:0] in_{name} = {value};")
         conns.append(f".{name}(in_{name})")
@@ -174,7 +191,7 @@ def main():
     src, out = Path(a.src).resolve(), Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     try:
-        top, plist = ports(src, a.top, out)
+        top, plist, clocked = ports(src, a.top, out)
     except RuntimeError as e:
         print(f"BUILD-FAIL {e}"); return
     def simulate(left):
@@ -183,10 +200,15 @@ def main():
         maps them onto flip-flops, as the flow does). async2sync: an
         asynchronous reset as a mux on the flip-flop's output, so that its
         release is seen at the edge after, as on the chip (sim lets a
-        flip-flop see a reset that falls at the same edge)."""
-        (out / "bist_sim.v").write_text(wrapper(top, plist, a.cycles, 0, a.start, a.bits, left, True))
+        flip-flop see a reset that falls at the same edge). Not on the
+        flip-flops a clock input clocks: their resets change between their
+        clock's edges (wrapper), where a reset clears at once on the chip and
+        async2sync's would be lost before the next edge (omsp_dbg_uart)."""
+        (out / "bist_sim.v").write_text(wrapper(top, plist, a.cycles, 0, a.start, a.bits, left, True, clocked=clocked))
+        derived = " ".join(f"w:in_{n}" for n in sorted(clocked)) + " %u" * (len(clocked) - 1)
+        sync = f"t:$*dff* {derived} %co*:-{FFS} %x:+[CLK] %d" if clocked else ""
         # The vendor-neutral cells a design may instantiate (LUT5, FDRE, ...) as Yosys models them.
-        r = podman(f"yosys -q -p 'read_verilog +/xilinx/cells_sim.v; read_verilog -sv {src} bist_sim.v; hierarchy -top bist_top; proc; flatten; memory; opt_clean; async2sync; "
+        r = podman(f"yosys -q -p 'read_verilog +/xilinx/cells_sim.v; read_verilog -sv {src} bist_sim.v; hierarchy -top bist_top; proc; flatten; memory; opt_clean; async2sync {sync}; "
                    f"sim -clock clk -zinit -n {a.cycles + 2} -w; write_json sim.json'", out)
         if r.returncode:
             raise RuntimeError("sim: " + (r.stderr or r.stdout).strip().splitlines()[-1])
@@ -210,7 +232,7 @@ def main():
     dividers = pll(a.mhz) if a.mhz != 50 else None
     mhz = 50 * dividers["PLL_CTRL_FBDIV"] / dividers["PLL_CTRL_REFDIV"] / dividers["PLL_CTRL_POSTDIV1"] / dividers["PLL_CTRL_POSTDIV2"] if dividers else 50
     (out / "bist_top.v").write_text(open(src).read() + "\n" + wrapper(top, plist, a.cycles, golden, a.start, a.bits, left,
-                                                                     dividers=dividers))
+                                                                     dividers=dividers, clocked=clocked))
     pins = (f"set_clk clk {'W1' if dividers else 'W0'}\nset_io la[0] GPIO8\nset_io la[1] GPIO10\nset_io la[2] GPIO13\n"
             "set_io clk_en OSC_CTRL_EN\n")
     for n, w in PLL_PORTS if dividers else []:
@@ -233,7 +255,9 @@ def main():
         err = [l for l in (r.stdout + r.stderr).splitlines() if "ERROR" in l or "Error" in l] or (r.stdout + r.stderr).splitlines()[-1:]
         print(f"BUILD-FAIL {err[0].strip()[:200] if err else '?'}"); return
     luts = len(json.load(open(out / "hb/placement.json"))["luts"])
-    fmax = re.findall(r"Max frequency for clock 'clk': ([\d.]+) MHz", open(out / "hb/nextpnr.log").read())[-1]
+    # the slowest clock of nextpnr's last report (a clock made in the fabric is one more)
+    fmax = min(dict(re.findall(r"Max frequency for clock\s+'([^']+)': ([\d.]+) MHz",
+                               open(out / "hb/nextpnr.log").read())).values(), key=float)
     if a.no_hw:
         print(f"BUILT luts={luts} golden={golden:08x} fmax={fmax}{note}"); return
     # 200 ms at 50 MHz: ten heartbeats; as many at a slower clock

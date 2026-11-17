@@ -159,7 +159,18 @@ _CLOCK_SOURCE_MUX_BITS = {
     ("W1", 0): (8, [1, 0, 0, 0]),
     ("N0", 0): (8, [0, 0, 1, 0]),
     ("N1", 1): (9, [1, 0, 1, 0]),
+    ("E0", 1): (9, [0, 1, 1, 0]),
+    ("E1", 1): (9, [1, 1, 1, 0]),
 }
+
+# E0, a clock the fabric makes and takes back (logic as clock, app note
+# AN-FG-019): with it the vendor also sets CLK_0_0_SEL .. CLK_7_0_SEL, at these
+# eight bits (tile x, y, BL, WL), which Kraken's rule #3 claims carry the lane
+# (design set lac, 2026-11-17). They always move together, so which select is
+# which bit is not known; mux 9 then holds its template, E0 (E1 sets its first
+# select). Of E0 with E1 and W0 the vendor's placer refuses the design.
+_E0_CLOCK_BITS = [(15, 13, 6, 25), (16, 13, 6, 25), (15, 14, 4, 26), (16, 14, 4, 26),
+                  (15, 15, 6, 25), (16, 15, 6, 25), (15, 17, 4, 26), (16, 17, 4, 26)]
 
 # Route-aware side-edge IOB output emission.
 #
@@ -523,6 +534,29 @@ def emit_direct_nvm_bit(f, reg, bit, value):
         f.write(f"set_case_analysis {value} TILE_00/RAW_W{reg}_B{bit}\n")
 
 
+# What the chip states to the fabric at a pad of its own (app note AN-FG-019),
+# by RBB_<row>_<col> and the pad input it comes by -> the bit, (tile x, y, BL,
+# WL), that takes the input past the pad's input register: the vendor's builds
+# of the status set (Kraken harness eda-placer, 2026-11-17) clear it wherever
+# the input goes to the fabric, and leave it set only where they pack the
+# flip-flop it feeds into the pad (`ready_ff`: the pad's CLK_SEL then follows
+# that flip-flop's domain). Left set, the input passes the register on domain
+# 1, which no clock drives in a design on W0, and reads 0 on silicon; cleared,
+# PLL_LOCK follows the PLL's enable (13 us behind it) and OSC_READY reads 1,
+# straight, through a LUT and through a flip-flop (2026-11-17).
+_STATUS_INPUT_BIT = {
+    (0, 12, 1): (12, 0, 9, 23),    # PLL_LOCK
+    (0, 25, 0): (24, 0, 10, 16),   # OSC_READY
+}
+
+
+def status_input_bits(row, col, k):
+    """The bits that let what the chip states reach the fabric by input k of pad RBB_<row>_<col>."""
+    if (row, col, k) not in _STATUS_INPUT_BIT:
+        raise UnsupportedBackendFeature(f"pad RBB_{row}_{col} input {k} carries no status the chip states")
+    return [(*_word_bit(*_STATUS_INPUT_BIT[(row, col, k)]), 0)]
+
+
 def held_control_bits(held):
     """The bits of a chip control (the PLL's) a pad holds at a constant.
 
@@ -864,6 +898,11 @@ def emit_sdc(placement, out_file):
         for clock in clock_sources.values():
             mux_idx, bits = _CLOCK_SOURCE_MUX_BITS[(clock['token'], int(clock.get('domain', 0)))]
             mux_bits[mux_idx] = bits[:]
+            if clock['token'] == 'E0':
+                for mux in range(8):
+                    mux_bits[mux][0] = 1
+                for where in _E0_CLOCK_BITS:
+                    emit_direct_nvm_bit(f, *_word_bit(*where), 1)
         for mux_idx in range(10):
             bits = mux_bits[mux_idx]
             for sel_bit in range(4):
@@ -1257,6 +1296,10 @@ def emit_sdc(placement, out_file):
                 raise UnsupportedBackendFeature(
                     f"IOB at ({gx},{gy}) uses bidirectional PAD mode, which is not yet RE-backed"
                 )
+
+            for k in iob.get('status', []):
+                for reg, bit, value in status_input_bits(gx, gy, int(k)):
+                    emit_direct_nvm_bit(f, reg, bit, value)
 
             if direction != 'output':
                 continue

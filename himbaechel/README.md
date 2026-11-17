@@ -48,9 +48,22 @@ W0). With the PLL or N0 on the first, the oscillator moves to the second, as in
 the vendor's build of a design on both. A row-31 pad's output passes a
 register on one of the two domains: the uarch puts it on the domain of the
 flip-flops behind the pad (domain 1 when they are of both, as the vendor
-does). On the other domain it would stop whenever that clock does: the PLL's
-while EN is low. N0 and N1 are mapped from the vendor's builds only; no
-vendor design says what drives them on the Shrike, so neither has run on it.
+does), and on the oscillator's when none is (where the vendor writes 1, a
+domain no clock drives in a design on W0 alone). On the other domain it would
+stop whenever that clock does: the PLL's while EN is low. N0 and N1 are
+mapped from the vendor's builds only; no vendor design says what drives them
+on the Shrike, so neither has run on it.
+
+The chip states two things to the fabric, at pads of their own (app note
+AN-FG-019): `PLL_LOCK`, by the second input of RBB_0_12, and `OSC_READY`, by
+the first of RBB_0_25. A design reads them as inputs the pin file names as the
+controls are named (`set_io PLL_LOCK PLL_LOCK`). Each leaves its pad by that
+input's pin, past the pad's input register (one bit each, emit_sdc.py
+`_STATUS_INPUT_BIT`: left set, the input passes the register on domain 1 and
+reads 0). On the Shrike PLL_LOCK rises 13 us after EN does and falls with it,
+and OSC_READY reads 1; straight to a pad, through a LUT and through a
+flip-flop. The encoding was read from Kraken's vendor builds of design set
+`status`: each input read alone, both, through a LUT and through a flip-flop.
 
 ## Timing
 
@@ -163,11 +176,23 @@ wrong bit: the router is given no way to take what the tools would get wrong.
   setting one holds its value inverted (xQpol 0 inverts its D), so it starts
   at 1 and the sinks of its Q take the inversion back. A flip-flop with both a
   set and a reset is refused.
-- A flip-flop's clock comes from a clock input (W0, W1, N0, N1), one GCLK pip
-  from every site: the graph has no way from the fabric to a clock, so a
-  design with a second clock made in the fabric does not route (`muxtree`,
-  `process`, `omsp_dbg_uart` in the regression). Whether the vendor's placer
-  takes one is not known.
+- **A flip-flop's clock comes from a clock input** (W0, W1, N0, N1, E0), one
+  GCLK pip from every site, and a site's flip-flops share one. A clock the
+  fabric makes (a divider, a gated clock, a pad that is no clock input) goes
+  the vendor's way (app notes AN-FG-009, AN-FG-019, "logic as clock"): out at
+  pad (31,11)'s first output, the lane's enable at (31,12) held at 1, and
+  back as clock input E0, which only domain 1 takes (mux 9 at its template,
+  and eight more selects, `_E0_CLOCK_BITS`); the pads are written as the
+  PLL's controls are. So one such clock a design, beside one on domain 0:
+  with W0, E0 and E1 the vendor's placer refuses the design too. Read from
+  Kraken's builds of design set `lac` (a counter on each lane, the enable
+  driven, the clock from a LUT); on the Shrike a counter on n[3] of the
+  oscillator's counter runs at exactly a sixteenth of it, and `muxtree`,
+  `process` and `omsp_dbg_uart` pass (2026-11-17). Their clock inputs come
+  from the BIST's LFSR, and an input that reaches a clock now changes on
+  every other cycle, the data between: where both changed on one edge,
+  Yosys's sim took the data from before it and the chip, its clock coming
+  back the long way, the data after.
 - **A site holds as many slices as the design needs**, but where a carry
   chain fills it: two while its logic takes at most four fifths of two a
   site, then three or four, as the vendor's packer packs densely only past
