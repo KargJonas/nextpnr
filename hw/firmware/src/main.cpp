@@ -1,10 +1,9 @@
 #include <Arduino.h>
-#include <LittleFS.h>
-#include <Shrike.h>
+#include <SPI.h>
 
-ShrikeFlash fpga;
-
-static const char* HITL_PATH = "/hitl.bin";
+// The Shrike's RP2040 to its FPGA (Vicharak's pin map): EN (nSLEEP), PWR
+// (nRST), and the configuration SPI, which also talks to a loaded design.
+static const uint8_t EN_PIN = 13, PWR_PIN = 12, SS_PIN = 1, SCK_PIN = 2, MOSI_PIN = 3, MISO_PIN = 0;
 
 // The MCU image as pack.py writes it: 1280 zeros, the sync word, then the
 // header (9 words) and 1024 rows (11 words each), every block followed by its
@@ -14,7 +13,7 @@ static const uint32_t MCU_BYTES = PREAMBLE + 4 + (HEADER_WORDS + 1 + ROWS * (ROW
 static const uint8_t  SYNC[4] = {0xAA, 0x22, 0xFF, 0x11};
 
 // FPGA GPIO6 → RP2040 MISO (GPIO0). Goes HIGH when FPGA enters functional mode.
-static const uint8_t CONFIG_PIN = 0;
+static const uint8_t CONFIG_PIN = MISO_PIN;
 
 static uint8_t image[MCU_BYTES];
 
@@ -59,28 +58,31 @@ static uint32_t check() {
     return out + PAD;
 }
 
-// Receive the MCU image from Serial, check it, and flash the FPGA with it.
-// False, the FPGA untouched, when the image is refused or the transfer fails.
-static bool receive_and_flash(uint32_t size) {
-    uint32_t got = Serial.readBytes(image, size);
-    if (got < size) {
-        Serial.printf("ERR: serial timeout after %lu of %lu bytes\n", got, size);
-        return false;
+// Load the FPGA as Vicharak's ShrikeFlash does (1.6 MHz SPI, the select
+// pulsed, the image in one selected stream), but reset it by PWR alone. Taken
+// low together with EN, as ShrikeFlash does, the reset leaves the BRAM reading
+// 0 until the chip next powers up: on a second Shrike-Lite every load after the
+// first read 0 with it and the right data with PWR alone (Vicharak's
+// stack_processor, 2026-11-17).
+static void load_fpga(const uint8_t* p, uint32_t n) {
+    digitalWrite(SS_PIN, LOW);
+    digitalWrite(PWR_PIN, LOW);
+    delay(100);
+    digitalWrite(PWR_PIN, HIGH);
+    delay(600);
+    digitalWrite(SS_PIN, HIGH);
+    delayMicroseconds(2000);
+    digitalWrite(SS_PIN, LOW);
+    static uint8_t chunk[256];
+    SPI.beginTransaction(SPISettings(1600000, MSBFIRST, SPI_MODE0));
+    for (uint32_t i = 0; i < n; i += sizeof chunk) {
+        uint32_t k = min((uint32_t)sizeof chunk, n - i);
+        memcpy(chunk, p + i, k);  // transfer() overwrites its buffer with what comes back
+        SPI.transfer(chunk, k);
     }
-    uint32_t n = check();
-    if (!n) return false;
-    File f = LittleFS.open(HITL_PATH, "w");
-    if (!f) {
-        Serial.println("ERR: LittleFS open failed");
-        return false;
-    }
-    f.write(image, n);
-    f.close();
-    if (!fpga.flash(HITL_PATH)) {
-        Serial.println("ERR: flash failed");
-        return false;
-    }
-    return true;
+    SPI.endTransaction();
+    digitalWrite(SS_PIN, HIGH);
+    delay(100);
 }
 
 void setup() {
@@ -91,17 +93,20 @@ void setup() {
     while (!Serial && millis() < 5000)
         delay(10);
 
-    if (!LittleFS.begin()) {
-        Serial.println("ERR: LittleFS init failed");
-        return;
-    }
-
-    if (!fpga.begin()) {
-        Serial.println("ERR: FPGA init failed");
-        return;
-    }
-
-    pinMode(CONFIG_PIN, INPUT);
+    // The FPGA awake (EN) and held in reset (PWR) until the first load.
+    pinMode(EN_PIN, OUTPUT);
+    pinMode(PWR_PIN, OUTPUT);
+    pinMode(SS_PIN, OUTPUT);
+    digitalWrite(EN_PIN, HIGH);
+    digitalWrite(PWR_PIN, LOW);
+    digitalWrite(SS_PIN, HIGH);
+    SPI.setSCK(SCK_PIN);
+    SPI.setTX(MOSI_PIN);
+    SPI.setRX(MISO_PIN);
+    SPI.begin();
+    // No pull-down on MISO (an RP2040 pin's default): GPIO6 reads its own
+    // pull-up, as CONFIG and as a design's input.
+    gpio_disable_pulls(MISO_PIN);
     Serial.println("HITL READY");
 }
 
@@ -120,16 +125,20 @@ void loop() {
             return;
         }
         Serial.println("READY");
-        if (!receive_and_flash(size))
+        uint32_t got = Serial.readBytes(image, size);
+        if (got < size) {
+            Serial.printf("ERR: serial timeout after %lu of %lu bytes\n", got, size);
             return;
+        }
+        uint32_t n = check();
+        if (!n)
+            return;
+        load_fpga(image, n);
         // Give FPGA time to enter functional mode then read CONFIG signal.
         delay(100);
-        int cfg = digitalRead(CONFIG_PIN);
         Serial.print("CONFIG=");
-        Serial.println(cfg);
+        Serial.println(digitalRead(CONFIG_PIN));
         Serial.println("OK");
-    } else if (cmd == "STATUS") {
-        Serial.println("IDLE");
     } else if (cmd == "CONFIG") {
         // Read FPGA CONFIG pin without flashing.
         delay(10);
@@ -148,30 +157,18 @@ void loop() {
         // XFER <hex byte> ...  ->  RX <hex byte> ...: to the loaded design over
         // the configuration SPI (mode 0, 1 MHz, MSB first), each byte with a
         // select of its own and 10 ms after it, as Vicharak's examples talk to
-        // theirs. After it SPI is as ShrikeFlash::begin left it (the next FLASH
-        // needs it), and MISO (GPIO0) is the CONFIG pin again.
-        SPI.end();
-        pinMode(1, OUTPUT);
-        digitalWrite(1, HIGH);
-        SPI.setSCK(2);
-        SPI.setTX(3);
-        SPI.setRX(0);
-        SPI.begin();
+        // theirs.
         Serial.print("RX");
         for (int i = 5; i + 1 < (int)cmd.length(); i += 3) {
             uint8_t b = (uint8_t)strtol(cmd.substring(i, i + 2).c_str(), nullptr, 16);
-            digitalWrite(1, LOW);
+            digitalWrite(SS_PIN, LOW);
             SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
             uint8_t r = SPI.transfer(b);
             SPI.endTransaction();
-            digitalWrite(1, HIGH);
+            digitalWrite(SS_PIN, HIGH);
             Serial.printf(" %02X", r);
             delay(10);
         }
         Serial.println();
-        SPI.end();
-        SPI.setCS(1);
-        SPI.begin();
-        pinMode(CONFIG_PIN, INPUT);
     }
 }
