@@ -635,9 +635,10 @@ def direct_nvm_to_bitstream(signal):
 # muxes' select 0), each in one of two layouts: select 0 at BL6 WL25, 1 at BL4
 # WL26, 2 at BL4 WL27 (CLK_4's tile (16,13), as CLK_8's and CLK_9's), or
 # selects 0-2 at BL4 WL26-28 (CLK_5's (16,14)). Read from the vendor's builds
-# whose SDC sets them to more than one code (Kraken, 158 builds, 2026-11-18):
-# CLK_4 and CLK_5 one bit each; CLK_6 and CLK_7 (tiles (15,15) and (15,17))
-# the vendor has only ever set alike, so which is which is not known.
+# whose SDC sets them to more than one code (Kraken, 158 builds, 2026-11-18),
+# and from design set bramctl (each side's write and read clock on the
+# oscillator or a loopback clock, every pair): CLK_6 at tile (15,15), CLK_7
+# at (15,17), in all eight of its images.
 
 def _clk_mux_bits(x, y, layout):
     places = [(6, 25), (4, 26), (4, 27)] if layout == "a" else [(4, 26), (4, 27), (4, 28)]

@@ -97,7 +97,7 @@ by the pins' own names, and the slice's clocks by a side's clock outputs:
 
     set_clk clk W0
     set_io  clk BRAM_N_WCLK                  # north write clock (and BRAM_N_RCLK, BRAM_S_*)
-    set_io  wen BRAM0_nWEN                   # nWCLKEN, nREN, nRCLKEN, RATIO[0..1]
+    set_io  wen BRAM0_nWEN                   # nWCLKEN, nREN, nRCLKEN, RATIO[0..1], WCLKINV, RCLKINV, PD
     set_io  d[0] BRAM0_WDATA[0]              # WDATA[0..7], WADDR[0..8], RADDR[0..8]
     set_io  q[0] BRAM0_RDATA[0]              # an input: what the slice reads
 
@@ -108,14 +108,38 @@ the design drives passes no register at the pad (as the PLL's controls), and
 RDATA bits leave their pads past the input register. The image's header powers
 the blocks a design uses (register bits 320 and 321). The pin map is Vicharak's
 shrike_serv io planner (all eight slices; 4-7 are 0-3 with the column
-mirrored); the pads' bits, all in each pad's own tile at BL9 (muxes from WL2,
-WL9, WL17, WL26, the held value at WL6 or WL13, the input's bypass at WL16 or
-WL23: O1, SR, the held value and input 1 a WL further on the rows 1 mod 3),
-are from Kraken's vendor builds of design set `brampads` (every pin held at 0,
-at 1 or driven at random, every RDATA read or not), and the clock muxes' from
-the vendor builds that set them. Not done: the clock inversions and the power
-down pin (left undriven, as GoConfigure's designs leave them), a Yosys memory
-mapped onto a slice, and which of CLK_6 and CLK_7 is the south read clock.
+mirrored), and BRAMk_WCLKINV, BRAMk_RCLKINV (the port takes the falling edge)
+and BRAMk_PD (the slice powered down), which the io planner leaves out, the
+placer's ram_def's (its pins of every slice land on the io planner's, one
+offset a slice). The pads' bits, all in each pad's own tile at BL9 (muxes from
+WL2, WL9, WL17, WL26, the held value at WL6 or WL13, the input's bypass at WL16
+or WL23: O1, SR, the held value and input 1 a WL further on the rows 1 mod 3),
+are from Kraken's vendor builds of design sets `brampads` (every pin held at
+0, at 1 or driven at random, every RDATA read or not) and `bramctl` (the
+inversions and PD alike, held bits as the vendor's in all 8 images), and the
+clock muxes' from `bramctl`, whose builds take each side's write and read
+clock from the oscillator or a loopback clock in every pairing.
+
+A memory needs no pins: Yosys maps one without initial contents (the image
+cannot load them) onto 512 x 8 slices (`brams.txt`, `bram_map.v`: write and
+read enables on nWEN and nREN, a falling-edge port by its inversion), and
+the uarch puts each SLG_BRAM on a slice the pin file leaves free, on a side
+whose write and read clocks it shares, its ports as the pins of their names.
+On the Shrike a 512 x 8 memory written and read at random every cycle
+(`designs/bram_infer`, bist.py) passes at 50 MHz, and one read or written on
+the falling edge at 12.5 MHz (at 50 the half-cycle paths are too long).
+
+Not done: the narrower ratios. Below a byte (RATIO 1-3) the word's place in
+it rides on WDATA, as datasheet tables 13 and 14 have it (write port
+WDATA[7:5], read port WDATA[4:2], the low address bit lowest; the placer's
+ram_def has the two ports the other way round, and every ratio reads back
+every word the datasheet's way and none the ram_def's with the address held
+for four cycles). But at 4096 x 1 a read takes those bits at the clock edge
+only, 1024 x 4 reads wrong when nREN gates its reads, and a memory written
+every cycle at either ratio reads back wrong even at 12.5 MHz, so Yosys builds
+narrow memories from 512 x 8 slices. Nor is the read's timing modelled:
+RDATA comes some 22 ns after the read clock (ram_def; the datasheet's worst
+read rate is 45 MHz), which nextpnr's estimate leaves out.
 
 On the Shrike our build of the vendor's own BRAM test (pol0: write once, read
 slowly) reads its data back, and our build of Vicharak's stack_processor (a

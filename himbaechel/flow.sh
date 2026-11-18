@@ -4,7 +4,8 @@
 #   yosys (synth -lut 6, adders and comparators on CARRY4, flip-flops with a
 #   synchronous or an asynchronous clear or set, latches and flip-flops with
 #   both as LUTs that feed back, latch_map.v, a tristate buffer on an inout
-#   port kept) -> nextpnr-himbaechel --uarch slg47910 (chipdb from the
+#   port kept, memories without initial contents on BRAM slices: brams.txt)
+#   -> nextpnr-himbaechel --uarch slg47910 (chipdb from the
 #   vendor graph) -> hb_emit (names -> node ids) -> route_bits + emit_sdc + pack
 #
 # Usage: himbaechel/flow.sh <design.v> <top> <pins> <build_dir> [nextpnr args ...]
@@ -27,7 +28,7 @@ mkdir -p "$OUT"
 [[ -f "$REPO/build/chipdb.json" ]] || python3 "$REPO/tools/gen_chipdb.py" -o "$REPO/build/chipdb.json"
 
 podman run --rm --init --userns=keep-id -e NEXTPNR_TIMEOUT -e FREQ -e FORGEFPGA -v "$HOME:$HOME" -w "$OUT" localhost/nextpnr-slg47910-hb bash -euo pipefail -c "
-yosys -q -l yosys.log -p 'read_verilog -lib -specify +/xilinx/cells_sim.v +/xilinx/cells_xtra.v; read_verilog -sv $SRC; hierarchy -top $TOP; proc; flatten; tribuf -logic; synth -top $TOP -flatten -run :fine; techmap -map +/techmap.v -map +/xilinx/arith_map.v -D LUT_SIZE=6; synth -lut 6 -run fine:; dfflegalize -cell \$_SDFFE_PP0P_ 0 -cell \$_SDFFE_PP1P_ 1 -cell \$_DFFE_PP0P_ 0 -cell \$_DFFE_PP1P_ 1 -cell \$_DLATCH_PP0_ x; opt_merge; abc -lut 6; opt_merge; techmap -map $HB/latch_map.v; techmap -D LUT_WIDTH=6 -map +/xilinx/lut_map.v -map +/xilinx/ff_map.v; clean; write_json netlist.json'
+yosys -q -l yosys.log -p 'read_verilog -lib -specify +/xilinx/cells_sim.v +/xilinx/cells_xtra.v; read_verilog -lib $HB/bram_cells.v; read_verilog -sv $SRC; hierarchy -top $TOP; proc; flatten; tribuf -logic; synth -top $TOP -flatten -run :fine; memory_libmap -lib $HB/brams.txt; techmap -map $HB/bram_map.v; techmap -map +/techmap.v -map +/xilinx/arith_map.v -D LUT_SIZE=6; synth -lut 6 -run fine:; dfflegalize -cell \$_SDFFE_PP0P_ 0 -cell \$_SDFFE_PP1P_ 1 -cell \$_DFFE_PP0P_ 0 -cell \$_DFFE_PP1P_ 1 -cell \$_DLATCH_PP0_ x; opt_merge; abc -lut 6; opt_merge; techmap -map $HB/latch_map.v; techmap -D LUT_WIDTH=6 -map +/xilinx/lut_map.v -map +/xilinx/ff_map.v; clean; write_json netlist.json'
 for seed in 1 2 3; do
   : > tools.log
   timeout \${NEXTPNR_TIMEOUT:-200} nextpnr-himbaechel --device slg47910 -o pins=$PINS -o placement=placement_raw.json \
