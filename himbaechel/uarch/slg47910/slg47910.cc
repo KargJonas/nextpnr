@@ -455,6 +455,8 @@ struct SlgImpl : HimbaechelAPI
         IdString pin = c.out ? id_OE : id_PAD;
         pad->addInput(pin);
         pad->connectPort(pin, net);
+        if (is_bram_pad(c.row, c.col))
+            bram_ports.push_back({pad->name, pin, c, false});
     }
 
     // The clock input whose net a net is: a BRAM's clocks are clock inputs.
@@ -530,6 +532,73 @@ struct SlgImpl : HimbaechelAPI
                     log_error("slg47910: %s: a BRAM has no pin %s\n", what.c_str(), pin.c_str(ctx));
             }
             ctx->cells.erase(ci->name);
+        }
+    }
+
+    // A BRAM pin is timed as the vendor's placer times it, by its ram_def
+    // (the largest of each port's pins): what the fabric drives into a write
+    // port's pins (nWEN, nWCLKEN, WADDR, WDATA) is set up 1.9 ns before the
+    // write clock's edge, into a read port's (nREN, nRCLKEN, RADDR) 1.6 ns
+    // before the read clock's, and RDATA leaves 22.6 ns after the read
+    // clock's edge (the datasheet's 45 MHz). The pad's cell takes the side's
+    // clock net on a port of its own (WCLK, RCLK) that no route reaches: the
+    // clock leaves by the side's clock mux, held. The edge is the falling one
+    // with WCLKINV or RCLKINV held at 1. RATIO, PD and the CLKINVs are held,
+    // not timed; a narrow ratio's address extension rides on WDATA, and is
+    // timed as WDATA.
+    struct BramArc
+    {
+        IdString clock;
+        ClockEdge edge;
+        delay_t delay;
+        bool out;
+    };
+    std::vector<std::tuple<IdString, IdString, Control, bool>> bram_ports; // pad cell, port, pin, RDATA
+    dict<std::pair<IdString, IdString>, BramArc> bram_arcs;
+
+    void time_brams()
+    {
+        static const std::map<std::tuple<int, int, int, bool>, std::string> pins = [] {
+            std::map<std::tuple<int, int, int, bool>, std::string> m;
+            for (auto &[name, c] : bram_pins())
+                if (!m.insert({{c.row, c.col, c.out, name.find("RDATA") != std::string::npos}, name}).second)
+                    log_error("slg47910: two BRAM pins at RBB_%d_%d %d\n", c.row, c.col, c.out);
+            return m;
+        }();
+        auto clock_net = [&](int mux) -> NetInfo * {
+            if (side_clocks.count(mux))
+                for (auto &[port, token] : clock_ports)
+                    if (token == side_clocks.at(mux) && ctx->ports.count(ctx->id(port)))
+                        return ctx->ports.at(ctx->id(port)).net;
+            return nullptr;
+        };
+        auto held_at_1 = [&](const std::string &name) {
+            const Control &c = control_names().at(name);
+            for (auto &h : held_controls)
+                if (h.x == c.col && h.y == c.row && h.out == c.out)
+                    return h.value == 1;
+            return false;
+        };
+        for (auto &[cell, port, c, status] : bram_ports) {
+            const std::string &name = pins.at({c.row, c.col, c.out, status});
+            std::string pin = name.substr(name.find('_') + 1), slice = name.substr(0, name.find('_'));
+            bool write = pin == "NWEN" || pin == "NWCLKEN" || pin.rfind("WADDR", 0) == 0 || pin.rfind("WDATA", 0) == 0;
+            bool read = pin == "NREN" || pin == "NRCLKEN" || pin.rfind("RADDR", 0) == 0 || status;
+            if (!write && !read)
+                continue;
+            NetInfo *net = clock_net((slice[4] < '4' ? 4 : 6) + read);
+            if (net == nullptr)
+                continue;
+            CellInfo *ci = ctx->cells.at(cell).get();
+            IdString cport = read ? id_RCLK : id_WCLK;
+            if (!ci->ports.count(cport)) {
+                ci->addInput(cport);
+                ci->connectPort(cport, net);
+                ci->cell_bel_pins[cport] = {};
+            }
+            bool falling = held_at_1(slice + (read ? "_RCLKINV" : "_WCLKINV"));
+            bram_arcs[{cell, port}] = {cport, falling ? FALLING_EDGE : RISING_EDGE,
+                                       ctx->getDelayFromNS(status ? 22.6 : write ? 1.9 : 1.6), status};
         }
     }
 
@@ -674,9 +743,12 @@ struct SlgImpl : HimbaechelAPI
             IdString pin = c.out ? id_IN1 : id_IN0;
             pad->addOutput(pin);
             pad->connectPort(pin, net);
+            if (is_bram_pad(c.row, c.col))
+                bram_ports.push_back({pad->name, pin, c, true});
         }
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
+        time_brams();
         for (auto &[port, bel] : io_bels)
             if (!used.count(port))
                 log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
@@ -1471,6 +1543,32 @@ struct SlgImpl : HimbaechelAPI
             (chip_bel_info(ctx->chip_info, cell->bel).flags & BEL_FLAG_MEMORY))
             return ctx->lookup_cell_delay(cell->type == id_SLG_LUT ? lut_m : lutl_m, fromPort, toPort, delay);
         return HimbaechelAPI::getCellDelay(cell, fromPort, toPort, delay);
+    }
+    TimingPortClass getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const override
+    {
+        auto it = bram_arcs.find({cell->name, port});
+        if (it != bram_arcs.end()) {
+            clockInfoCount = 1;
+            return it->second.out ? TMG_REGISTER_OUTPUT : TMG_REGISTER_INPUT;
+        }
+        if (cell->type == id_SLG_IOB && port.in(id_WCLK, id_RCLK))
+            return TMG_CLOCK_INPUT;
+        return HimbaechelAPI::getPortTimingClass(cell, port, clockInfoCount);
+    }
+    TimingClockingInfo getPortClockingInfo(const CellInfo *cell, IdString port, int index) const override
+    {
+        auto it = bram_arcs.find({cell->name, port});
+        if (it == bram_arcs.end())
+            return HimbaechelAPI::getPortClockingInfo(cell, port, index);
+        TimingClockingInfo info;
+        info.clock_port = it->second.clock;
+        info.edge = it->second.edge;
+        if (it->second.out)
+            info.clockToQ = DelayQuad(it->second.delay);
+        else
+            info.setup = DelayPair(it->second.delay);
+        info.hold = DelayPair(0);
+        return info;
     }
     IdString getBelBucketForCellType(IdString cell_type) const override { return cell_type; }
 
