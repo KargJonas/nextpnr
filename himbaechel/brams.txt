@@ -2,8 +2,8 @@
 # slices, each a write port and a read port, both clocked on either edge,
 # with no initial contents (the image cannot load them: the SLG47910's MCU
 # stream has no BRAM section). 512 x 8 only: the narrower ratios (RATIO 1-3,
-# the word's place in a byte on WDATA) do not read back as a memory written
-# and read every cycle does on the Shrike (bram_map.v).
+# the word's place in a byte on WDATA) fail on the Shrike when the address
+# changes every cycle (bram_map.v).
 ram block $__SLG47910_BRAM_ {
 	abits 9;
 	widths 8 global;

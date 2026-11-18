@@ -129,17 +129,29 @@ On the Shrike a 512 x 8 memory written and read at random every cycle
 (`designs/bram_infer`, bist.py) passes at 50 MHz, and one read or written on
 the falling edge at 12.5 MHz (at 50 the half-cycle paths are too long).
 
-Not done: the narrower ratios. Below a byte (RATIO 1-3) the word's place in
-it rides on WDATA, as datasheet tables 13 and 14 have it (write port
-WDATA[7:5], read port WDATA[4:2], the low address bit lowest; the placer's
-ram_def has the two ports the other way round, and every ratio reads back
-every word the datasheet's way and none the ram_def's with the address held
-for four cycles). But at 4096 x 1 a read takes those bits at the clock edge
-only, 1024 x 4 reads wrong when nREN gates its reads, and a memory written
-every cycle at either ratio reads back wrong even at 12.5 MHz, so Yosys builds
-narrow memories from 512 x 8 slices. Nor is the read's timing modelled:
-RDATA comes some 22 ns after the read clock (ram_def; the datasheet's worst
-read rate is 45 MHz), which nextpnr's estimate leaves out.
+nextpnr times a slice's pins as the placer's ram_def does (the largest of
+each port's): what the fabric drives into the write port is set up 1.9 ns
+before the write clock, into the read port 1.6 ns before the read clock, and
+RDATA comes 22.6 ns after the read clock, the datasheet's worst read rate (45
+MHz). A pad's cell takes the side's clock net on a port no route reaches, so a
+BRAM path is a register path of that clock, the falling edge's with the port's
+inversion. A memory read into logic is then good for some 33 MHz by
+nextpnr's count, though at room temperature the Shrike runs it at 50 (the
+datasheet's typical read rate is 87 MHz).
+
+The narrower ratios (RATIO 1-3) are for the pin file alone. Below a byte the
+word's place in it rides on WDATA, as datasheet tables 13 and 14 have it
+(write port WDATA[7:5], read port WDATA[4:2], the low address bit lowest; the
+placer's ram_def has the two ports the other way round), and every ratio reads
+back every word the datasheet's way with the address held: written by one
+nWEN pulse in four cycles, read with nREN low and RDATA taken three cycles on.
+Streamed they fail, at 50 MHz and at 12.5 alike, with the BRAM on the falling
+edge too (so not its hold time): no read with nREN low throughout matches the
+word of any of the last six cycles' addresses, a new one every one to four
+cycles, and at 1024 x 4 and 2048 x 2 writes with nWEN low throughout corrupt
+words even with the address held four cycles (4096 x 1 writes stream fine).
+A narrow ratio takes some inputs an edge before others, which no memory Yosys
+infers allows, so Yosys builds narrow memories from 512 x 8 slices.
 
 On the Shrike our build of the vendor's own BRAM test (pol0: write once, read
 slowly) reads its data back, and our build of Vicharak's stack_processor (a

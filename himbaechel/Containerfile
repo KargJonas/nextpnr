@@ -11,7 +11,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 # The uarch's branch, until it is in nextpnr.
 ARG NEXTPNR_REPO=https://github.com/KargJonas/nextpnr
-ARG NEXTPNR_COMMIT=36d3be0b
+ARG NEXTPNR_COMMIT=cd26ebe6
 RUN git clone -q --branch himbaechel-slg47910 ${NEXTPNR_REPO} /src/nextpnr \
     && git -C /src/nextpnr checkout -q ${NEXTPNR_COMMIT}
 COPY --from=forgefpga slg47910 /src/forgefpga/slg47910

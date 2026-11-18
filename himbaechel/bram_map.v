@@ -9,11 +9,10 @@
 // RATIO 0 only. Below a byte the word's place in it rides on WDATA, as
 // datasheet tables 13 and 14 have it (write port WDATA[7:5], read port
 // WDATA[4:2]; the placer's ram_def has the two the other way round): every
-// word reads back so with the address held for four cycles. But at 4096 x 1
-// a read takes those bits at the clock edge only while 1024 x 4 reads wrong
-// when nREN gates the reads, and a memory written every cycle at either ratio
-// reads back wrong even at 12.5 MHz: what times the narrow ratios is not
-// known yet.
+// word reads back so with the address held for four cycles. Streamed, a
+// narrow ratio fails at 50 and at 12.5 MHz alike: no read with nREN low
+// throughout matches any of the last six cycles' words, and at 1024 x 4 and
+// 2048 x 2 writes with nWEN low throughout corrupt words (README.md, BRAM).
 module $__SLG47910_BRAM_ (...);
 	parameter INIT = 0;
 	parameter WIDTH = 8;
