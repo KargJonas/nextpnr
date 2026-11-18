@@ -7,7 +7,8 @@
  * file is what nextpnr does with it:
  *
  *   pack       pads, clock inputs and the PLL's controls from the ports and a
- *              pin file, the synthesiser's LUTs and flip-flops as SLG_LUT and
+ *              pin file, a BRAM (SLG_BRAM) as the pins of a slice it takes,
+ *              the synthesiser's LUTs and flip-flops as SLG_LUT and
  *              SLG_FF, a LUT with its single flip-flop as one cluster,
  *              constants as LUTs, CARRY4 chains as one cluster of carry bits
  *              up a column, a MUXF7 or a MUXF8 as one cluster with the LUTs
@@ -159,10 +160,21 @@ const std::map<std::string, Control> &bram_pins()
                      {"RATIO", 2}, {"WDATA", 8}, {"WADDR", 9}, {"RADDR", 9}, {"RDATA", 8}})
             for (int i = 0; i < width; i++)
                 names.push_back(bus + "[" + std::to_string(i) + "]");
+        // WCLKINV, RCLKINV (a port's clock inverted: it takes the falling edge)
+        // and PD (the slice powered down), which the io planner leaves out:
+        // the placer's ram_def (EFLX1K_T40ULP_2P4KB.ram_def), whose pins of
+        // every slice land on the 40 above, one offset a slice. PD is that
+        // file's name; two slices' PDs share a pad.
+        static const int more[4][3][3] = {{{0, 29, 0}, {0, 29, 1}, {6, 31, 0}},
+                                          {{8, 31, 0}, {8, 31, 1}, {6, 31, 1}},
+                                          {{17, 30, 0}, {17, 30, 1}, {24, 30, 0}},
+                                          {{26, 30, 0}, {26, 30, 1}, {24, 30, 1}}};
+        for (const char *name : {"WCLKINV", "RCLKINV", "PD"})
+            names.push_back(name);
         std::map<std::string, Control> m;
         for (int k = 0; k < 8; k++)
-            for (int i = 0; i < 40; i++) {
-                const int *p = north[k % 4][i];
+            for (int i = 0; i < 43; i++) {
+                const int *p = i < 40 ? north[k % 4][i] : more[k % 4][i - 40];
                 m["BRAM" + std::to_string(k) + "_" + names[i]] = {p[0], k < 4 ? p[1] : 31 - p[1], p[2]};
             }
         return m;
@@ -187,8 +199,9 @@ bool is_bram_pad(int row, int col)
 // table 10: N out0 the north write clock, out1 its read clock; S the south's),
 // each through a clock mux that takes one of the clock inputs: the pin file
 // names an output port that carries a clock input's net. The vendor's builds
-// set CLK_4..CLK_7 for N out0, N out1, S out0, S out1 (AN-011's: north read
-// clock on E input 0, write clock on E input 1; Kraken's bram set).
+// set CLK_4..CLK_7 for N out0, N out1, S out0, S out1 (Kraken's design set
+// bramctl: each side's write and read clock on the oscillator or on a
+// loopback clock, every pair of them).
 const std::map<std::string, int> &bram_clock_names()
 {
     static const std::map<std::string, int> t = {
@@ -315,6 +328,7 @@ struct SlgImpl : HimbaechelAPI
     };
     std::vector<BramClock> bram_clocks; // a BRAM clock output and the clock input it takes
     std::set<char> bram_blocks;         // the BRAM blocks a design uses: N (slices 0-3), S (4-7)
+    std::set<int> bram_slices;          // the BRAM slices taken: by the pin file's names, by SLG_BRAM cells
 
     BelId iob_at(int row, int col, const std::string &where)
     {
@@ -357,6 +371,8 @@ struct SlgImpl : HimbaechelAPI
                 int row, col;
                 if (where.rfind("BRAM", 0) == 0)
                     bram_blocks.insert(where[4] == '_' ? where[5] : where[4] < '4' ? 'N' : 'S');
+                if (where.rfind("BRAM", 0) == 0 && isdigit(where[4]))
+                    bram_slices.insert(where[4] - '0');
                 auto bclk = bram_clock_names().find(where);
                 if (bclk != bram_clock_names().end()) {
                     if (!taken.insert({-1, bclk->second, 0}).second)
@@ -415,6 +431,108 @@ struct SlgImpl : HimbaechelAPI
         return token == "W0" && zero ? 1 : clock_tokens().at(token).domain;
     }
 
+    // A chip control (the PLL's, a BRAM's) a net drives. Held at a constant
+    // it is the pad's to hold (its own bits, as the vendor writes them): no
+    // cell, no route. Driven, it is routed to the pad's first output (PAD) or
+    // its second (OE); the two of a pad are one cell.
+    void drive_control(const Control &c, NetInfo *net, const std::string &what,
+                       std::vector<std::unique_ptr<CellInfo>> &made)
+    {
+        const CellInfo *driver = net->driver.cell;
+        bool vcc = driver && driver->type == ctx->id("VCC"), gnd = driver && driver->type == ctx->id("GND");
+        if (vcc || gnd) {
+            held_controls.push_back({c.col, c.row, c.out, vcc ? 1 : 0});
+            return;
+        }
+        CellInfo *&pad = control_cells[{c.row, c.col}];
+        if (pad == nullptr) {
+            auto cell = std::make_unique<CellInfo>(ctx, ctx->idf("$ctl_%d_%d", c.row, c.col), id_SLG_IOB);
+            cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(iob_at(c.row, c.col, what)));
+            cell->attrs[ctx->id("CONTROL")] = Property(1);
+            pad = cell.get();
+            made.push_back(std::move(cell));
+        }
+        IdString pin = c.out ? id_OE : id_PAD;
+        pad->addInput(pin);
+        pad->connectPort(pin, net);
+    }
+
+    // The clock input whose net a net is: a BRAM's clocks are clock inputs.
+    std::string clock_token(const NetInfo *net, const std::string &what)
+    {
+        for (auto &[port, token] : clock_ports)
+            if (net != nullptr && ctx->ports.count(ctx->id(port)) && ctx->ports.at(ctx->id(port)).net == net)
+                return token;
+        log_error("slg47910: %s carries no clock input's net: a BRAM clock is a clock input\n", what.c_str());
+    }
+
+    // A BRAM side's clock outputs (muxes 4-7), each one clock input.
+    std::map<int, std::string> side_clocks;
+    bool side_fits(int mux, const std::string &token) const
+    {
+        return !side_clocks.count(mux) || side_clocks.at(mux) == token;
+    }
+    void side_clock(int mux, const std::string &token, const std::string &what)
+    {
+        if (!side_fits(mux, token))
+            log_error("slg47910: %s: the BRAM clock output (mux %d) takes %s already\n", what.c_str(), mux,
+                      side_clocks.at(mux).c_str());
+        side_clocks[mux] = token;
+    }
+
+    // A block RAM the synthesiser mapped a memory onto (SLG_BRAM, from
+    // flow.sh's brams.txt) is a slice's pins: each port is the pin of its name
+    // (BRAM<k>_<port>), driven, held or read as the pin file's would be, and
+    // WCLK and RCLK the side's write and read clock outputs, which its four
+    // slices share. It takes the slice its SLICE says, or else the first that
+    // neither the pin file nor another cell takes, on a side whose clocks it
+    // shares.
+    void pack_brams(std::vector<std::unique_ptr<CellInfo>> &made,
+                    std::vector<std::tuple<Control, NetInfo *, std::string>> &statuses)
+    {
+        std::vector<CellInfo *> brams;
+        for (auto &[name, ci] : ctx->cells)
+            if (ci->type == id_SLG_BRAM)
+                brams.push_back(ci.get());
+        for (CellInfo *ci : brams) {
+            std::string what = ci->name.str(ctx);
+            std::string wclk = clock_token(ci->getPort(id_WCLK), what + " WCLK");
+            std::string rclk = clock_token(ci->getPort(id_RCLK), what + " RCLK");
+            int want = ci->params.count(id_SLICE) ? int(ci->params.at(id_SLICE).as_int64()) : -1;
+            int slice = -1;
+            for (int k = 0; k < 8 && slice < 0; k++)
+                if ((want < 0 || k == want) && !bram_slices.count(k) && side_fits(k < 4 ? 4 : 6, wclk) &&
+                    side_fits(k < 4 ? 5 : 7, rclk))
+                    slice = k;
+            if (slice < 0)
+                log_error("slg47910: no BRAM slice is left for %s: eight slices, the four of a side on one write "
+                          "clock and one read clock\n",
+                          what.c_str());
+            log_info("slg47910: %s is BRAM slice %d\n", what.c_str(), slice);
+            bram_slices.insert(slice);
+            bram_blocks.insert(slice < 4 ? 'N' : 'S');
+            side_clock(slice < 4 ? 4 : 6, wclk, what);
+            side_clock(slice < 4 ? 5 : 7, rclk, what);
+            std::vector<IdString> pins;
+            for (auto &[pin, info] : ci->ports)
+                pins.push_back(pin);
+            for (IdString pin : pins) {
+                NetInfo *net = ci->getPort(pin);
+                ci->disconnectPort(pin);
+                if (net == nullptr || pin == id_WCLK || pin == id_RCLK)
+                    continue;
+                std::string name = "BRAM" + std::to_string(slice) + "_" + pin.str(ctx);
+                if (status_names().count(name))
+                    statuses.push_back({status_names().at(name), net, what});
+                else if (control_names().count(name))
+                    drive_control(control_names().at(name), net, what, made);
+                else
+                    log_error("slg47910: %s: a BRAM has no pin %s\n", what.c_str(), pin.c_str(ctx));
+            }
+            ctx->cells.erase(ci->name);
+        }
+    }
+
     void pack_io()
     {
         std::vector<IdString> gone;
@@ -434,7 +552,7 @@ struct SlgImpl : HimbaechelAPI
 
         std::vector<std::unique_ptr<CellInfo>> made;
         std::set<std::string> used;
-        std::vector<std::pair<std::string, NetInfo *>> statuses;
+        std::vector<std::tuple<Control, NetInfo *, std::string>> statuses;
         for (auto &[name, port] : ctx->ports) {
             std::string pname = name.str(ctx);
             if (!port.net)
@@ -442,7 +560,7 @@ struct SlgImpl : HimbaechelAPI
             if (status_ports.count(pname)) {
                 if (port.type != PORT_IN)
                     log_error("slg47910: %s reads what the chip states: it must be an input\n", pname.c_str());
-                statuses.push_back({pname, port.net});
+                statuses.push_back({status_ports.at(pname), port.net, pname});
                 used.insert(pname);
                 continue;
             }
@@ -454,32 +572,10 @@ struct SlgImpl : HimbaechelAPI
                 continue;
             }
             if (control_ports.count(pname)) {
-                // A control held at a constant is the pad's to hold (its own
-                // bits, as the vendor writes them): no cell, no route. One the
-                // design drives is routed to the pad's first output (PAD) or
-                // its second (OE); the two of a pad are one cell.
-                const CellInfo *driver = port.net->driver.cell;
-                bool vcc = driver && driver->type == ctx->id("VCC"), gnd = driver && driver->type == ctx->id("GND");
                 if (port.type != PORT_OUT)
                     log_error("slg47910: %s drives a chip control: it must be an output\n", pname.c_str());
-                const Control &c = control_ports.at(pname);
+                drive_control(control_ports.at(pname), port.net, pname, made);
                 used.insert(pname);
-                if (vcc || gnd) {
-                    held_controls.push_back({c.col, c.row, c.out, vcc ? 1 : 0});
-                    continue;
-                }
-                CellInfo *&pad = control_cells[{c.row, c.col}];
-                if (pad == nullptr) {
-                    auto cell =
-                            std::make_unique<CellInfo>(ctx, ctx->idf("$ctl_%d_%d", c.row, c.col), id_SLG_IOB);
-                    cell->attrs[ctx->id("BEL")] = std::string(ctx->nameOfBel(iob_at(c.row, c.col, pname)));
-                    cell->attrs[ctx->id("CONTROL")] = Property(1);
-                    pad = cell.get();
-                    made.push_back(std::move(cell));
-                }
-                IdString pin = c.out ? id_OE : id_PAD;
-                pad->addInput(pin);
-                pad->connectPort(pin, port.net);
                 continue;
             }
             if (clock_ports.count(pname)) {
@@ -552,11 +648,19 @@ struct SlgImpl : HimbaechelAPI
                 cell->connectPort(id_PAD, port.net);
             made.push_back(std::move(cell));
         }
+        // A BRAM clock output takes its port's clock input, or the clock input
+        // whose net its port carries.
+        for (auto &[pname, mux] : bram_clock_ports) {
+            NetInfo *net = ctx->ports.count(ctx->id(pname)) ? ctx->ports.at(ctx->id(pname)).net : nullptr;
+            side_clock(mux, clock_ports.count(pname) ? clock_ports.at(pname) : clock_token(net, pname), pname);
+        }
+        pack_brams(made, statuses);
+        for (auto &[mux, token] : side_clocks)
+            bram_clocks.push_back({mux, token});
         // What the chip states leaves its pad by one of the pad's inputs: an
         // output of the cell that holds the pad (its controls, the oscillator's
         // enable), or of one of its own.
-        for (auto &[pname, net] : statuses) {
-            const Control &c = status_ports.at(pname);
+        for (auto &[c, net, pname] : statuses) {
             std::string bel = ctx->nameOfBel(iob_at(c.row, c.col, pname));
             CellInfo *pad = nullptr;
             for (auto &cell : made)
@@ -573,20 +677,6 @@ struct SlgImpl : HimbaechelAPI
         }
         for (auto &cell : made)
             ctx->cells[cell->name] = std::move(cell);
-        // A BRAM clock output takes its port's clock input, or the clock input
-        // whose net its port carries.
-        for (auto &[pname, mux] : bram_clock_ports) {
-            const NetInfo *net = ctx->ports.count(ctx->id(pname)) ? ctx->ports.at(ctx->id(pname)).net : nullptr;
-            std::string token = clock_ports.count(pname) ? clock_ports.at(pname) : "";
-            for (auto &[cport, t] : clock_ports)
-                if (token.empty() && net != nullptr && ctx->ports.count(ctx->id(cport)) &&
-                    ctx->ports.at(ctx->id(cport)).net == net)
-                    token = t;
-            if (token.empty())
-                log_error("slg47910: %s carries no clock input's net: a BRAM clock is a clock input\n",
-                          pname.c_str());
-            bram_clocks.push_back({mux, token});
-        }
         for (auto &[port, bel] : io_bels)
             if (!used.count(port))
                 log_error("slg47910: the pin file names a port %s the design has not\n", port.c_str());
